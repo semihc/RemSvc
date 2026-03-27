@@ -1,0 +1,82 @@
+//
+//
+// (c) Bupa Australia Pty Ltd
+// Author: Semih Cemilogllu
+// Last update: 13/01/2025
+//
+//
+// Invoke via:
+// /data/local/stow/grpc-1.67.0/bin/protoc-27.2.0 --grpc_out=./out --cpp_out=./out --plugin=protoc-gen-grpc="/data/local/stow/grpc-1.67.0/bin/grpc_cpp_plugin" RemSvc.proto
+
+syntax = "proto3";
+
+
+// Remote Service Package
+package RS;
+
+// Import the Empty message definition.
+// import "google/protobuf/empty.proto";
+
+// Similar to google.protobuf.Empty
+message Empty {}
+
+
+
+message PingMsg {
+    int32 seq     = 1 ; // Sequence id or number 
+    int64 time    = 2 ; // Timestamp of the ping   
+    bytes data    = 3 ; // Ping data or payload
+}
+
+message PongMsg {
+    int32 seq     = 1 ; // Sequence id of the Ping that requests Pong
+    int64 time    = 2 ; // Timestamp of the pong   
+    bytes data    = 3 ; // Ping payload to be copied back
+}
+
+message StatusMsg {
+	int32 rc   = 1 ;  // Return code
+	string msg = 2 ;  // Return msg (optional)
+}
+
+
+// Request to remote command
+message RemCmdMsg {
+  string  cmd       = 1 ;   // Command
+  int32   cmdtyp    = 2 ;   // Command type (0=Cmd 1=Pwsh)
+  string  cmdusr    = 3 ;   // Command executing user name (at the remote server)
+  int32   tid       = 4 ;   // Transaction id of this request
+  string  src       = 5 ;   // Source server/endpoint/identifier
+  string  hsh       = 6 ;   // Hash value of command
+}
+
+
+// Response to remote command
+message RemResMsg {
+  int32   rc     = 1 ;  // Command return code
+  int32   tid    = 2 ;  // Transaction id of the original request
+  string  out    = 3 ;  // Stdout of the command
+  string  err    = 4 ;  // Stderr of the command
+  string  hsh    = 5 ;  // Hash value
+}
+
+
+
+
+
+// Interface exported by the server.
+service RemSvc {
+
+	// Ping service 
+	rpc Ping(PingMsg) returns (PongMsg) {}
+	
+	// Get status of the service/server
+	rpc GetStatus(Empty) returns (StatusMsg) {}
+	
+	// Remote command RPC 
+	rpc RemCmd(RemCmdMsg) returns (RemResMsg) {}
+
+	// Remote command streaming RPC
+	rpc RemCmdStrm(stream RemCmdMsg) returns (stream RemResMsg) {}
+
+}

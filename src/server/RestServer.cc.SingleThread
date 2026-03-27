@@ -1,0 +1,267 @@
+/*
+ *
+ * Copyright Bupa Australia Pty Ltd
+ *
+ * Author: Semih Cemiloglu
+ *
+ */
+
+// Std includes
+#include <iostream>
+#include <memory>
+#include <string>
+
+
+#include <QHttpServer>
+#include <QHttpServerResponse>
+#include <QJsonObject>
+#include <QString>
+#include <QTcpServer>
+#include <QProcess>
+#include <QCoreApplication>
+#include <QThread>
+#include <QDebug>
+
+// Prj includes
+#include "CLI.hh"
+#include "Log.hh"
+#include "Assert.hh"
+#include "SignalHandler.hh"
+
+
+
+// Std
+using namespace std;
+using namespace RS;
+
+using namespace Qt::StringLiterals;
+
+
+
+int runInProcess(string_view cmd, string& out, string& err)
+{
+    //-QThread::sleep(2); 
+    QProcess prg;
+    prg.startCommand(cmd.data());
+
+    int waitPeriod = 3000; // msecs
+    bool finished = prg.waitForFinished(waitPeriod);
+    bool readyRead = prg.waitForReadyRead(waitPeriod);
+    Log(debug,"f={} r={}", finished, readyRead);
+    
+    QByteArray errStr = prg.readAllStandardError();
+    QByteArray outStr = prg.readAllStandardOutput();    
+    int rv = prg.exitCode();
+
+    out = outStr.constData();
+    Log(debug) << outStr.data();
+    if(!errStr.isEmpty()) {
+	err = errStr.constData();
+	Log(error) << errStr.data();
+    }
+    
+    return rv;
+}
+
+
+
+
+
+static inline QString host(const QHttpServerRequest &request)
+{
+    return QString::fromLatin1(request.value("Host"));
+}
+
+
+void DefineHTTPInterface(QHttpServer& httpserver)
+{
+    httpserver.route("/", []() {
+        return "Root";
+    });
+
+    httpserver.route("/query", [] (const QHttpServerRequest &request) {
+        return host(request) + u"/query/"_s;
+    });
+
+    httpserver.route("/query/", [] (qint32 id,
+				    const QHttpServerRequest &request) {
+        return u"%1/query/%2"_s.arg(host(request)).arg(id);
+    });
+
+    httpserver.route("/remaddr", [](const QHttpServerRequest &request) {
+        return request.remoteAddress().toString();
+    });
+
+    httpserver.route("/remcmd/", [](const QString& cmd,
+				    const QHttpServerRequest &request) {
+	// Decode the URL-encoded query string
+        QString decodedCmd = QUrl::fromPercentEncoding(cmd.toUtf8());
+	QString msg = QString("Hello, %1!").arg(cmd);
+
+	string cmd2 = cmd.toUtf8().data();
+	string out,err;
+	int rc = runInProcess(cmd2, out, err);
+	Log(info,"rc={}",rc);
+	
+	if(rc) {
+	    Log(warn, err);
+	    return QString(err.data());
+	}
+	else {
+   	    Log(info, out);
+	    return QString(out.data());
+	}
+    });
+
+
+    httpserver.route("/jcmd/", [](const QString& cmd,
+				  const QHttpServerRequest &request) {
+	// Decode the URL-encoded query string
+        QString decodedCmd = QUrl::fromPercentEncoding(cmd.toUtf8());
+	QString msg = QString("Hello, %1!").arg(cmd);
+
+	string cmd2 = cmd.toUtf8().data();
+	string out,err;
+	int rc = runInProcess(cmd2, out, err);
+	Log(info,"rc={}",rc);
+
+	QJsonObject jo;
+	jo["rc"] = rc;
+	if(!out.empty()) {
+	    Log(info, out);
+	    jo["out"] = out.data();
+	}
+	if(!err.empty()) {
+	    Log(warn, err);
+	    jo["err"] = err.data();
+	}
+	return jo;	
+    });
+
+
+    httpserver.route("/rcmd/", [](const QString& cmd,
+				  const QHttpServerRequest &request) {
+	// Decode the URL-encoded query string
+        QString decodedCmd = QUrl::fromPercentEncoding(cmd.toUtf8());
+	string cmd2 = decodedCmd.toUtf8().data();
+	string out,err;
+	int rc = runInProcess(cmd2, out, err);
+	Log(info,"rc={}",rc);
+
+	// Construct JSON object
+	QJsonObject jo;
+	jo["rc"] = rc;
+	if(!out.empty()) {
+	    Log(info, out);
+	    jo["out"] = out.data();
+	}
+	if(!err.empty()) {
+	    Log(warn, err);
+	    jo["err"] = err.data();
+	}
+
+	// Return based on success of the command
+	if(rc == 0) {
+	    return QHttpServerResponse(jo, QHttpServerResponse::StatusCode::Ok);
+	}
+	else {
+	    return QHttpServerResponse("500 Error", QHttpServerResponse::StatusCode::InternalServerError);
+	}
+	
+    });
+    
+    
+    // Default route (404 handler)
+    httpserver.route(".*", [](const QHttpServerRequest &request) {
+	return QHttpServerResponse("404 Not Found", QHttpServerResponse::StatusCode::NotFound);
+    });
+
+}
+
+
+int RunHTTPServer(QHttpServer& httpserver, uint16_t port,
+		  QHostAddress address = QHostAddress::Any)
+{ 
+    auto tcpserver = std::make_unique<QTcpServer>();
+    if (!tcpserver->listen(address, port) ||
+	!httpserver.bind(tcpserver.get())) {
+	Log(error,"Server failed to listen on port {}", port);
+        return -1;
+    }
+    
+    tcpserver.release();
+    Log(info,"Running on http://127.0.0.1:{}",port);
+    return 0;
+}
+
+
+
+
+
+
+
+class GracefulShutdownHandler : public QObject {
+    Q_OBJECT
+
+public:
+    GracefulShutdownHandler(QObject* parent = nullptr) : QObject(parent) {
+        connect(qApp, &QCoreApplication::aboutToQuit, this, &GracefulShutdownHandler::handleQuit);
+    }
+
+private slots:
+    void handleQuit() {
+        Log(info) << "Ctrl+C or application close requested. Performing graceful shutdown...";
+    }
+};
+
+
+
+int main(int argc, char *argv[]) {
+    int rc{};
+    string_view appName{ argv[0] };
+
+       
+    // Command line application
+    CLI::App cli_app;
+    int port{60051};
+    cli_app.add_option("--port", port, "Port"); 
+    rc = ConfigureCLI(cli_app, argc, argv);
+    if(rc) return rc;
+
+    
+    // Specify the default log file
+    CliLogFile = DefaultCLiLogFileName(appName);
+    InitLogging();  // Initialize logging components
+    Log(info,"Starting {}", appName);
+
+    // Qt core application
+    QCoreApplication qt_app(argc, argv);
+
+    // Setup signal handling
+    SignalHandler::setupSignalHandlers();
+    SignalHandler signalHandler;
+    QObject::connect(&signalHandler, &SignalHandler::quitRequested, &qt_app, &QCoreApplication::quit);
+    
+    // Create an instance to handle the signal
+    GracefulShutdownHandler shutdownHandler; 
+
+    Log(info, "Starting HTTP Server at port {}", port);
+    QHttpServer httpserver;
+    DefineHTTPInterface(httpserver);
+    RunHTTPServer(httpserver, port);
+
+  
+    // Run the Qt event loop
+    rc = qt_app.exec();
+
+    Log(info, "Stopping HTTP Server");
+
+    
+    Log(info,"Stopping application {}", appName);
+    TermLogging();  // Terminate logging 
+    return rc;
+}
+
+
+// Qt spefic include, must be at the end
+#include "RestServer.moc"
