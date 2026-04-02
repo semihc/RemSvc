@@ -1,0 +1,28 @@
+package-name: airflow-provider-remsvc
+name: RemSvc
+description: |
+  Apache Airflow provider for RemSvc — remote job execution via gRPC.
+  Provides a deferrable operator and async trigger so worker slots are
+  held only for job submission and result fetch, not for polling.
+versions:
+  - 1.0.0
+
+dependencies:
+  - apache-airflow>=2.2.0
+  - grpcio>=1.51.0
+  - grpcio-status>=1.51.0
+  - protobuf>=4.0.0
+
+operators:
+  - integration-name: RemSvc
+    python-modules:
+      - remsvc_provider.operators.remsvc.RemSvcOperator
+
+triggers:
+  - integration-name: RemSvc
+    python-modules:
+      - remsvc_provider.triggers.remsvc.RemSvcTrigger
+
+connection-types:
+  - hook-class-name: remsvc_provider.hooks.remsvc.RemSvcHook
+    connection-type: remsvc
