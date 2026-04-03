@@ -128,7 +128,7 @@ StatusResult RemSvcClient::doGetStatus()
 }
 
 
-int RemSvcClient::doRemCmd(string_view cmd, int cmdtyp, int tid)
+int RemSvcClient::doRemCmd(std::string_view cmd, int cmdtyp, int tid)
 {
     RemCmdMsg req;
     RemResMsg res;

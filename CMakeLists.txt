@@ -24,6 +24,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(gRPC_DIR /data/local/stow/grpc-1.67.0/lib/cmake/grpc)
   set(Qt6_DIR /data/local/stow/qt-6.8.1/lib/cmake/Qt6)
   set(CLI11_DIR /data/local/stow/CLI11-2.4.1/share/cmake/CLI11)    
+  set(GTest_DIR /data/local/stow/gtest-1.17.0/lib64/cmake/GTest)
 endif()
 
 

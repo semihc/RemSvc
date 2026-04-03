@@ -21,7 +21,7 @@ using namespace RS;
 int main(int argc, char *argv[])
 {
     int rc{};
-    string_view appName{argv[0]};
+    std::string_view appName{argv[0]};
 
     CLI::App cli_app;
     string server{"localhost"};
