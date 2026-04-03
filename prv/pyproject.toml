@@ -35,4 +35,4 @@ packages = ["remsvc_provider"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths    = ["tests"]
+testpaths    = ["../tst/unit/prv"]

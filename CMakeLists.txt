@@ -41,4 +41,7 @@ qt_standard_project_setup()
 
 
 # Subdirectories
-add_subdirectory(src) 
+add_subdirectory(src)
+
+enable_testing()
+add_subdirectory(tst)

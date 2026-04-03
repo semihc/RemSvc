@@ -13,4 +13,5 @@ _deps
 .#*
 bld_vc
 bld_gcc
+.claude/
 

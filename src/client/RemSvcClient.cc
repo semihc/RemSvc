@@ -4,248 +4,191 @@
  *
  * Author: Semih Cemiloglu
  *
- */ 
+ */
 
-// Std includes
+#include "RemSvcClient.hh"
+
+// Std
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <string_view>
 
-// Absl includes
-#include <absl/flags/flag.h>
-#include <absl/flags/parse.h>
+// Abseil
 #include <absl/time/time.h>
 
-// gRPC includes
+// gRPC
 #include <grpcpp/grpcpp.h>
 
-// Prj includes
-#include "RemSvc.grpc.pb.h"
-#include <QCoreApplication>
-#include <QDebug>
-#include "CLI.hh"
+// Prj
+#include "Hash.hh"
 #include "Log.hh"
 
-// Std
 using namespace std;
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::Status;
-
-// Prj
 using namespace RS;
-using RS::RemSvc;
 
 
-ABSL_FLAG(std::string, target, "localhost:50051", "Server address");
+// ── Adapters wrapping the real gRPC stub ──────────────────────────────────
 
-/*ERASE
-using grpc::Channel;
-using grpc::ClientContext;
-using grpc::Status;
-using helloworld::Greeter;
-using helloworld::HelloReply;
-using helloworld::HelloRequest;
-*/
+namespace {
 
-class RemSvcClient {
- public:
-  RemSvcClient(std::shared_ptr<Channel> channel)
-      : stub_(RemSvc::NewStub(channel)) {}
-
-    // Assembles the client's payload, sends it and presents the response back
-    // from the server.
-    // Send a Ping message
-    string doPing(const int seq=0);
-
-    // Send a RemCmd (Remote Command) message
-    int doRemCmd(std::string_view cmd);
-
- private:
-  std::unique_ptr<RemSvc::Stub> stub_;
+struct GrpcCmdStrmClient : RS::ICmdStrmClient {
+    // Client writes RemCmdMsg, reads RemResMsg  →  <W=RemCmdMsg, R=RemResMsg>
+    unique_ptr<grpc::ClientReaderWriter<RS::RemCmdMsg, RS::RemResMsg>> rw;
+    explicit GrpcCmdStrmClient(
+        unique_ptr<grpc::ClientReaderWriter<RS::RemCmdMsg, RS::RemResMsg>> s)
+        : rw(std::move(s)) {}
+    bool Write(const RS::RemCmdMsg& msg) override { return rw->Write(msg); }
+    bool Read(RS::RemResMsg* msg)        override { return rw->Read(msg); }
+    void WritesDone()                    override { rw->WritesDone(); }
+    grpc::Status Finish()                override { return rw->Finish(); }
 };
 
+struct GrpcRemSvcStub : RS::IRemSvcStub {
+    unique_ptr<RS::RemSvc::Stub> stub;
+    explicit GrpcRemSvcStub(shared_ptr<Channel> ch)
+        : stub(RS::RemSvc::NewStub(ch)) {}
 
-string RemSvcClient::doPing(const int seq)
+    grpc::Status Ping(grpc::ClientContext* ctx,
+                      const RS::PingMsg& req,
+                      RS::PongMsg* res) override
+    { return stub->Ping(ctx, req, res); }
+
+    grpc::Status GetStatus(grpc::ClientContext* ctx,
+                           const RS::Empty& req,
+                           RS::StatusMsg* res) override
+    { return stub->GetStatus(ctx, req, res); }
+
+    grpc::Status RemCmd(grpc::ClientContext* ctx,
+                        const RS::RemCmdMsg& req,
+                        RS::RemResMsg* res) override
+    { return stub->RemCmd(ctx, req, res); }
+
+    unique_ptr<RS::ICmdStrmClient> RemCmdStrm(grpc::ClientContext* ctx) override
+    { return make_unique<GrpcCmdStrmClient>(stub->RemCmdStrm(ctx)); }
+};
+
+} // anonymous namespace
+
+
+// ── RemSvcClient ──────────────────────────────────────────────────────────
+
+RemSvcClient::RemSvcClient(shared_ptr<Channel> channel)
+    : stub_(make_unique<GrpcRemSvcStub>(std::move(channel)))
+{}
+
+RemSvcClient::RemSvcClient(unique_ptr<IRemSvcStub> stub)
+    : stub_(std::move(stub))
+{}
+
+
+PingResult RemSvcClient::doPing(int seq)
 {
     PingMsg ping;
     PongMsg pong;
-	 
+
     ping.set_seq(seq);
-	 
-    // Get the current time as an absl::Time object.
+
     absl::Time now = absl::Now();
-    // Convert the absl::Time to a Unix timestamp (seconds since the epoch).
-    int64_t timestamp = absl::ToUnixSeconds(now);
-    ping.set_time( timestamp );
-	
-    // You can also use the local time zone:
-    std::string isoStr = absl::FormatTime(absl::RFC3339_full, now, absl::LocalTimeZone());
-	
-    Log(info, "Current time in ISO 8601 format (Local): {}", isoStr);
-	
-    ping.set_data( isoStr.data() );
-	
-	
+    ping.set_time(absl::ToUnixSeconds(now));
+    string isoStr = absl::FormatTime(absl::RFC3339_full, now, absl::LocalTimeZone());
+    Log(info, "Ping time: {}", isoStr);
+    ping.set_data(isoStr.data());
 
-    // Context for the client. It could be used to convey extra information to
-    // the server and/or tweak certain RPC behaviors.
-    ClientContext context;
-
-    // The actual RPC.
-    grpc::Status status = stub_->Ping(&context, ping, &pong);
-    // Act upon its status.
+    ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    grpc::Status status = stub_->Ping(&ctx, ping, &pong);
     if (status.ok()) {
-	//-return pong.message();
-	//-std::cerr << "seqId: " << pong.seq() << std::endl;
-	Log(info, "seqId: {}", pong.seq());
-	return "RPC successful";
-    } else {
-	//-std::cout << status.error_code() << ": " << status.error_message()
-	//-<< std::endl;
-	Log(error, "{}: {}",  (int)status.error_code(), status.error_message());
-	return "RPC failed";
+        Log(info, "Ping seqId: {}", pong.seq());
+        return {true, pong.seq()};
     }
-
+    Log(error, "Ping failed {}: {}", (int)status.error_code(), status.error_message());
+    return {false, 0};
 }
 
 
-int RemSvcClient::doRemCmd(std::string_view cmd)
+StatusResult RemSvcClient::doGetStatus()
 {
-    RemCmdMsg rcmd; // Remote command message
-    RemResMsg rres; // Remote response message
-    int rv{0};
+    Empty req;
+    StatusMsg res;
 
-
-    // Context for the client. 
-    ClientContext context;
-    // The actual RPC.
-    Log(info,"Sending command: {}", cmd);
-    rcmd.set_cmd( string(cmd) );
-    grpc::Status status = stub_->RemCmd(&context, rcmd, &rres);
+    ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    grpc::Status status = stub_->GetStatus(&ctx, req, &res);
     if (status.ok()) {
-	Log(info,"RPC successful");
-	string out = rres.out();
-	string err = rres.err();
-	rv = rres.rc();
-	Log(info, "rc={} out={}", rv, out);
-	if(!err.empty())
-	    Log(error, "err={}", err);
-    } else {
-	Log(error, "RPC failed {}: {}",  (int)status.error_code(), status.error_message());
-	rv = 1; // Failure
+        Log(info, "GetStatus rc={} msg={}", res.rc(), res.msg());
+        return {true, res.rc(), res.msg()};
+    }
+    Log(error, "GetStatus RPC failed {}: {}", (int)status.error_code(), status.error_message());
+    return {false, -1, {}};
+}
+
+
+int RemSvcClient::doRemCmd(string_view cmd, int cmdtyp, int tid)
+{
+    RemCmdMsg req;
+    RemResMsg res;
+
+    req.set_cmd(string(cmd));
+    req.set_cmdtyp(cmdtyp);
+    req.set_tid(tid);
+    req.set_hsh(crc32Hex(cmd));   // integrity hash — server verifies this
+
+    Log(info, "RemCmd sending cmd={}", cmd);
+    ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    grpc::Status status = stub_->RemCmd(&ctx, req, &res);
+    if (status.ok()) {
+        int rv = res.rc();
+        Log(info, "RemCmd rc={} out={}", rv, res.out());
+        if (!res.err().empty())
+            Log(error, "RemCmd err={}", res.err());
+        return rv;
+    }
+    Log(error, "RemCmd RPC failed {}: {}", (int)status.error_code(), status.error_message());
+    return 1;
+}
+
+
+int RemSvcClient::doRemCmdStrm(const vector<string>& cmds, int cmdtyp)
+{
+    ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    auto stream = stub_->RemCmdStrm(&ctx);
+
+    // Send all commands (each with its CRC32 hash), then signal end-of-writes.
+    for (const auto& cmd : cmds) {
+        RemCmdMsg req;
+        req.set_cmd(cmd);
+        req.set_cmdtyp(cmdtyp);
+        req.set_hsh(crc32Hex(cmd));
+        Log(info, "RemCmdStrm sending cmd={}", cmd);
+        if (!stream->Write(req)) {
+            Log(error, "RemCmdStrm write failed");
+            break;
+        }
+    }
+    stream->WritesDone();
+
+    // Read all responses.
+    RemResMsg res;
+    while (stream->Read(&res)) {
+        Log(info, "RemCmdStrm rc={} out={}", res.rc(), res.out());
+        if (!res.err().empty())
+            Log(error, "RemCmdStrm err={}", res.err());
     }
 
-    
-    return rv;
-}
-
-
-int main0(int argc, char** argv) {
-  absl::ParseCommandLine(argc, argv);
-
-  // Instantiate the client. It requires a channel, out of which the actual RPCs
-  // are created. This channel models a connection to an endpoint specified by
-  // the argument "--target=" which is the only expected argument.
-  std::string target_str = absl::GetFlag(FLAGS_target);
-  // We indicate that the channel isn't authenticated (use of
-  // InsecureChannelCredentials()).
-  RemSvcClient client(
-      grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials()));
-	  
-  /*ERASE
-  std::string user("world");
-  std::string reply = greeter.SayHello(user);
-  std::cout << "Greeter received: " << reply << std::endl;
-  reply = greeter.SayHelloAgain(user);
-  std::cout << "Greeter received: " << reply << std::endl;
-  */
-  
-  std::string reply = client.doPing(1001);
-  std::cout << "Client received: " << reply << std::endl;
-  
-  return 0;
-}
-
-
-
-
-int main2(int argc, char *argv[]) {
-    std::string filename;
-    int verbosity = 0;
-
-    CLI::App cli_app{"My Qt App"};
-    cli_app.add_option("-f,--file", filename, "Input filename")->required();
-    cli_app.add_option("-v,--verbose", verbosity, "Verbosity level");
-
-    CLI11_PARSE(cli_app, argc, argv);
-
-    QCoreApplication qt_app(argc, argv); // Qt app initialized
-
-    qDebug() << "Filename:" << QString::fromStdString(filename);
-    qDebug() << "Verbosity:" << verbosity;
-
-    // ... rest of your Qt application ...
-
-    return qt_app.exec();
-}
-
-
-
-
-int main(int argc, char *argv[]) {
-    int rc{};
-    std::string_view appName{ argv[0] };
-
-    
-    
-    // Command line application
-    CLI::App cli_app;
-    string server{"localhost"};
-    cli_app.add_option("-s,--server", server, "Server");
-    int port{50051};
-    cli_app.add_option("-p,--port", port, "Port");
-    int ping{0};
-    cli_app.add_option("-n,--ping", ping, "Ping Sequence");   
-    string cmd{};
-    cli_app.add_option("-c,--cmd", cmd, "Command");
-    
-    
-    rc = ConfigureCLI(cli_app, argc, argv);
-    if(rc) return rc;
-
-
-    // Specify the default log file
-    CliLogFile = DefaultCLiLogFileName(appName);
-    InitLogging();  // Initialize logging components
-    Log(info,"Starting {}", appName);
-
-    // Qt core application
-    QCoreApplication qt_app(argc, argv);
-    //rc = qt_app.exec();
-
-
-    // Construct target endpoint string
-    string target = format("{}:{}", server, port);
-  
-   
-    // We indicate that the channel isn't authenticated (use of
-    // InsecureChannelCredentials()).
-    RemSvcClient client(
-      grpc::CreateChannel(target, grpc::InsecureChannelCredentials()));
-
-    // Execute pings as required
-    while(ping > 0) {
-	string reply = client.doPing(ping--);
-	Log("Client received: {}", reply);
+    grpc::Status status = stream->Finish();
+    if (!status.ok()) {
+        Log(error, "RemCmdStrm RPC failed {}: {}",
+            (int)status.error_code(), status.error_message());
+        return 1;
     }
-
-    if(! cmd.empty()) {
-	int rv = client.doRemCmd(cmd);
-    }
-    
-    Log(info,"Stopping {}", appName);
-    TermLogging();  // Terminate logging 
-    return rc;
+    return 0;
 }
+
+

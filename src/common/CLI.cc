@@ -40,7 +40,7 @@ namespace RS {
   std::string DefaultCLiLogFileName(std::string_view appName)
   {
     fs::path ap = appName;
-    fs::path al = ap.replace_extension(".log");
+    ap.replace_extension(".log");
     return ap.string();
   }
   

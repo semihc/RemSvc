@@ -38,16 +38,20 @@ cd prv/
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests
+# Run all tests (testpaths in pyproject.toml points to tst/unit/prv/)
 pytest
 
-# Run a single test
-pytest tests/test_remsvc_async.py::TestRemSvcTrigger::test_run_success -v
+# Run all tests from repo root (no cd required)
+PYTHONPATH=prv pytest tst/unit/prv
+
+# Run a single test (from prv/)
+pytest ../tst/unit/prv/test_remsvc_async.py::TestRemSvcTrigger::test_run_success -v
 
 # Regenerate Python gRPC stubs from proto
 ./regen_proto.sh
 ```
 
+Tests live in `tst/unit/prv/`. `tst/unit/prv/conftest.py` adds `prv/` to `sys.path` automatically.
 Tests use `pytest-asyncio` with `asyncio_mode = "auto"` (configured in `pyproject.toml`).
 
 ## Architecture

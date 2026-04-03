@@ -1,10 +1,10 @@
 """
-tests/test_remsvc_async.py
-==========================
-Async tests for RemSvcTrigger and the deferrable RemSvcOperator.
+tst/unit/prv/test_remsvc_async.py
+==================================
+Async unit tests for RemSvcTrigger and the deferrable RemSvcOperator.
 
 Run from RemSvc/prv/:
-  pytest tests/test_remsvc_async.py -v --asyncio-mode=auto
+  pytest ../tst/unit/prv -v
 
 Requires:
   pip install pytest pytest-asyncio apache-airflow>=2.2.0

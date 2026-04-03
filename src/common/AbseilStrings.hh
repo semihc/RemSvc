@@ -2,6 +2,10 @@
 #define ABSEIL_STRINGS_HH
 #pragma once
 
+// Convenience header: pulls in the most-used Abseil string utilities and
+// injects them into the RS namespace via `using namespace absl`.
+// Include this instead of individual absl/strings/* headers when you need
+// StrCat, StrJoin, StrFormat, etc. within RS code.
 // Abseil includes
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
