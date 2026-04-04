@@ -67,13 +67,17 @@ public:
 
     // Execute a single command on the server.
     // Computes and sends CRC32 hash for server-side integrity verification.
+    // cmdusr: if non-empty, the server executes the command as that OS user.
     // Returns the process exit code, or 1 on RPC failure.
-    int doRemCmd(std::string_view cmd, int cmdtyp = 0, int tid = 0);
+    int doRemCmd(std::string_view cmd, int cmdtyp = 0, int tid = 0,
+                 std::string_view cmdusr = {});
 
     // Execute a stream of commands on the server (bidirectional streaming).
-    // Sends each command with CRC32 hash; logs each result.
+    // Sends each command with CRC32 hash and cmdusr; logs each result.
+    // cmdusr: applied to every command in the stream.
     // Returns 0 on success, 1 on RPC failure.
-    int doRemCmdStrm(const std::vector<std::string>& cmds, int cmdtyp = 0);
+    int doRemCmdStrm(const std::vector<std::string>& cmds, int cmdtyp = 0,
+                     std::string_view cmdusr = {});
 
 private:
     std::unique_ptr<IRemSvcStub> stub_;

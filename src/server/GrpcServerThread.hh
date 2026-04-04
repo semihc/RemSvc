@@ -3,17 +3,36 @@
 #define GRPC_SERVER_THREAD_HH
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 #include <QThread>
 #include <grpcpp/grpcpp.h>
 #include "RemSvcServiceImpl.hh"
 
+
+// TLS credentials for the gRPC server.
+// certFile and keyFile are required when TLS is enabled.
+// caFile is optional — supply it to require mutual TLS (client certificates).
+struct TlsConfig {
+    std::string certFile;  // path to PEM server certificate
+    std::string keyFile;   // path to PEM private key
+    std::string caFile;    // path to PEM CA cert (empty = server-side TLS only)
+};
+
+
 // Runs the gRPC server in a dedicated QThread.
 // Construction binds and starts the server; call start() to begin serving.
 // Call stop() for graceful shutdown.
+//
+// tls:       if present, enables TLS using the supplied cert/key files.
+// allowlist: forwarded to RemSvcServiceImpl — see its header for semantics.
 class GrpcServerThread : public QThread {
     Q_OBJECT
 public:
-    explicit GrpcServerThread(int port);
+    explicit GrpcServerThread(int port,
+                              std::optional<TlsConfig> tls       = std::nullopt,
+                              std::vector<std::string> allowlist  = {});
 
     void run() override;
     void stop();

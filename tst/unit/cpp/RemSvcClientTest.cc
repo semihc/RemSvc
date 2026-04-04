@@ -200,6 +200,24 @@ TEST(RemSvcClient, RemCmdReturnsOneOnRpcFailure)
     EXPECT_EQ(client.doRemCmd("cmd"), 1);
 }
 
+TEST(RemSvcClient, RemCmdForwardsCmdusr)
+{
+    auto [client, stub] = makeClient();
+
+    client.doRemCmd("echo hi", /*cmdtyp=*/0, /*tid=*/0, /*cmdusr=*/"deploy");
+
+    EXPECT_EQ(stub->capturedRemCmdReq.cmdusr(), "deploy");
+}
+
+TEST(RemSvcClient, RemCmdEmptyCmdusrNotSet)
+{
+    auto [client, stub] = makeClient();
+
+    client.doRemCmd("echo hi");   // cmdusr defaults to empty
+
+    EXPECT_EQ(stub->capturedRemCmdReq.cmdusr(), "");
+}
+
 
 // ---------------------------------------------------------------------------
 // doRemCmdStrm
@@ -246,4 +264,25 @@ TEST(RemSvcClient, RemCmdStrmEmptyCommandListReturnsZero)
 {
     auto [client, stub] = makeClient();
     EXPECT_EQ(client.doRemCmdStrm({}), 0);
+}
+
+TEST(RemSvcClient, RemCmdStrmForwardsCmdusr)
+{
+    auto [client, stub] = makeClient();
+
+    client.doRemCmdStrm({"echo a", "echo b"}, /*cmdtyp=*/0, /*cmdusr=*/"alice");
+
+    ASSERT_EQ(stub->strmWritten.size(), 2u);
+    EXPECT_EQ(stub->strmWritten[0].cmdusr(), "alice");
+    EXPECT_EQ(stub->strmWritten[1].cmdusr(), "alice");
+}
+
+TEST(RemSvcClient, RemCmdStrmEmptyCmdusrNotSet)
+{
+    auto [client, stub] = makeClient();
+
+    client.doRemCmdStrm({"echo hi"});   // cmdusr defaults to empty
+
+    ASSERT_EQ(stub->strmWritten.size(), 1u);
+    EXPECT_EQ(stub->strmWritten[0].cmdusr(), "");
 }

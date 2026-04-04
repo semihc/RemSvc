@@ -4,6 +4,8 @@
 
 #include "RemSvcClient.hh"
 
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <format>
@@ -32,6 +34,14 @@ int main(int argc, char *argv[])
     cli_app.add_option("-n,--ping", ping, "Ping sequence number");
     string cmd{};
     cli_app.add_option("-c,--cmd", cmd, "Command to execute");
+    string cmdusr{};
+    cli_app.add_option("-u,--user", cmdusr, "OS user to execute the command as (Linux only)");
+
+    // TLS options
+    bool   tls{false};
+    string caFile;
+    cli_app.add_flag  ("--tls",     tls,    "Connect using TLS");
+    cli_app.add_option("--ca-cert", caFile, "CA certificate PEM file (empty = system roots)");
 
     rc = ConfigureCLI(cli_app, argc, argv);
     if (rc) return rc;
@@ -43,8 +53,24 @@ int main(int argc, char *argv[])
     QCoreApplication qt_app(argc, argv);
 
     string target = format("{}:{}", server, port);
-    RemSvcClient client(
-        grpc::CreateChannel(target, grpc::InsecureChannelCredentials()));
+
+    shared_ptr<grpc::ChannelCredentials> creds;
+    if (tls) {
+        grpc::SslCredentialsOptions ssl_opts;
+        if (!caFile.empty()) {
+            ifstream f(caFile, ios::binary);
+            if (!f) { Log(error, "Cannot open CA cert file: {}", caFile); return 1; }
+            ostringstream ss;
+            ss << f.rdbuf();
+            ssl_opts.pem_root_certs = ss.str();
+        }
+        creds = grpc::SslCredentials(ssl_opts);
+        Log(info, "TLS enabled (ca={})", caFile.empty() ? "system roots" : caFile);
+    } else {
+        creds = grpc::InsecureChannelCredentials();
+    }
+
+    RemSvcClient client(grpc::CreateChannel(target, creds));
 
     while (ping > 0) {
         PingResult pr = client.doPing(ping--);
@@ -52,7 +78,7 @@ int main(int argc, char *argv[])
     }
 
     if (!cmd.empty())
-        rc = client.doRemCmd(cmd);
+        rc = client.doRemCmd(cmd, /*cmdtyp=*/0, /*tid=*/0, cmdusr);
 
     Log(info, "Stopping {}", appName);
     TermLogging();

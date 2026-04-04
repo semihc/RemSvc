@@ -21,6 +21,7 @@ target_sources(server
   PRIVATE
   GrpcServerThread.cc
   RemSvcServer.cc
+  ServerConfig.cc
   SignalHandler.cc
 )
 set_target_properties(server PROPERTIES

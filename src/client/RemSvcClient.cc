@@ -128,7 +128,8 @@ StatusResult RemSvcClient::doGetStatus()
 }
 
 
-int RemSvcClient::doRemCmd(std::string_view cmd, int cmdtyp, int tid)
+int RemSvcClient::doRemCmd(std::string_view cmd, int cmdtyp, int tid,
+                           std::string_view cmdusr)
 {
     RemCmdMsg req;
     RemResMsg res;
@@ -137,8 +138,10 @@ int RemSvcClient::doRemCmd(std::string_view cmd, int cmdtyp, int tid)
     req.set_cmdtyp(cmdtyp);
     req.set_tid(tid);
     req.set_hsh(crc32Hex(cmd));   // integrity hash — server verifies this
+    if (!cmdusr.empty())
+        req.set_cmdusr(string(cmdusr));
 
-    Log(info, "RemCmd sending cmd={}", cmd);
+    Log(info, "RemCmd sending cmd={} usr={}", cmd, cmdusr);
     ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
     grpc::Status status = stub_->RemCmd(&ctx, req, &res);
@@ -154,19 +157,22 @@ int RemSvcClient::doRemCmd(std::string_view cmd, int cmdtyp, int tid)
 }
 
 
-int RemSvcClient::doRemCmdStrm(const vector<string>& cmds, int cmdtyp)
+int RemSvcClient::doRemCmdStrm(const vector<string>& cmds, int cmdtyp,
+                               std::string_view cmdusr)
 {
     ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
     auto stream = stub_->RemCmdStrm(&ctx);
 
-    // Send all commands (each with its CRC32 hash), then signal end-of-writes.
+    // Send all commands (each with its CRC32 hash and cmdusr), then signal end-of-writes.
     for (const auto& cmd : cmds) {
         RemCmdMsg req;
         req.set_cmd(cmd);
         req.set_cmdtyp(cmdtyp);
         req.set_hsh(crc32Hex(cmd));
-        Log(info, "RemCmdStrm sending cmd={}", cmd);
+        if (!cmdusr.empty())
+            req.set_cmdusr(string(cmdusr));
+        Log(info, "RemCmdStrm sending cmd={} usr={}", cmd, cmdusr);
         if (!stream->Write(req)) {
             Log(error, "RemCmdStrm write failed");
             break;

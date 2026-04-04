@@ -14,61 +14,119 @@
 
 // Prj includes
 #include "GrpcServerThread.hh"
+#include "ServerConfig.hh"
 #include <QCoreApplication>
 #include "CLI.hh"
 #include "Log.hh"
 #include "SignalHandler.hh"
 
 
-
 using namespace std;
 using namespace RS;
-
-
 
 
 int main(int argc, char *argv[]) {
     int rc{};
     std::string_view appName{ argv[0] };
 
-    
-    
-    // Command line application
+    // ── Step 1: pre-parse --config only, to load the INI file first ──────────
+    // CLI11 allow_extras lets us ignore all other flags at this stage.
+    std::string configFile;
+    {
+        CLI::App pre;
+        pre.add_option("--config", configFile, "INI configuration file");
+        pre.allow_extras(true);
+        try { pre.parse(argc, argv); } catch (...) {}
+    }
+
+    // ── Step 2: load INI config (provides defaults for all settings) ─────────
+    ServerConfig cfg;
+    if (!configFile.empty()) {
+        auto err = loadServerConfig(configFile, cfg);
+        if (!err.empty()) {
+            std::cerr << "Error loading config: " << err << "\n";
+            return 1;
+        }
+    }
+
+    // ── Step 3: full CLI parse — explicitly supplied flags override cfg ───────
     CLI::App cli_app;
-    int port{50051};
-    cli_app.add_option("--port", port, "Port"); 
+    cli_app.add_option("--config", configFile, "INI configuration file");
+
+    int port = cfg.port;
+    cli_app.add_option("--port", port, "Port");
+
+    // TLS options
+    bool        tls     = cfg.tlsEnabled;
+    std::string certFile = cfg.certFile;
+    std::string keyFile  = cfg.keyFile;
+    std::string caFile   = cfg.caFile;
+    cli_app.add_flag  ("--tls",      tls,      "Enable TLS");
+    cli_app.add_option("--cert",     certFile,  "Server certificate PEM file (required with --tls)");
+    cli_app.add_option("--key",      keyFile,   "Server private key PEM file (required with --tls)");
+    cli_app.add_option("--ca-cert",  caFile,    "CA certificate PEM file (enables mutual TLS)");
+
+    // Authorization: regex patterns (CLI list replaces config list when supplied)
+    std::vector<std::string> allowlist = cfg.allowlist;
+    cli_app.add_option("--allow", allowlist,
+                       "Allowed command regex pattern (repeatable; empty = allow all)");
+
+    // Logging overrides
+    std::string logFile  = cfg.logFile;
+    std::string logLevel = cfg.logLevel;
+    int         dbgLevel = cfg.debugLevel;
+    cli_app.add_option("--log-file-override",  logFile,
+                       "Override log file path from config");
+    cli_app.add_option("--log-level-override", logLevel,
+                       "Override log level from config (trace|debug|info|warn|error)");
+
     rc = ConfigureCLI(cli_app, argc, argv);
-    if(rc) return rc;
+    if (rc) return rc;
 
+    if (tls && (certFile.empty() || keyFile.empty())) {
+        std::cerr << "--tls requires both --cert and --key\n";
+        return 1;
+    }
 
-    // Specify the default log file
-    CliLogFile = DefaultCLiLogFileName(appName);
-    InitLogging();  // Initialize logging components
-    Log(info,"Starting {}", appName);
+    // ── Step 4: configure logging ────────────────────────────────────────────
+    // Config file and CLI overrides feed the global CLI vars that InitLogging
+    // reads.  The file sink uses a rotating policy: 10 files x 10 MB each.
+    if (!logFile.empty())
+        CliLogFile = logFile;
+    else
+        CliLogFile = DefaultCLiLogFileName(appName);
 
+    if (!logLevel.empty())
+        CliLogLevel = logLevel;
 
-    // Qt core application
+    if (dbgLevel >= 0)
+        CliDbgLevel = dbgLevel;
+
+    InitLogging();
+    Log(info, "Starting {}", appName);
+    if (!configFile.empty())
+        Log(info, "Loaded config from {}", configFile);
+
+    // ── Step 5: Qt event loop + gRPC server ──────────────────────────────────
     QCoreApplication qt_app(argc, argv);
 
-    // Setup signal handling
     SignalHandler::setupSignalHandlers();
     SignalHandler signalHandler;
     QObject::connect(&signalHandler, &SignalHandler::quitRequested, &qt_app, &QCoreApplication::quit);
-    
-    // Start the gRPC server thread
-    GrpcServerThread grpcThread{port};
+
+    std::optional<TlsConfig> tlsConfig;
+    if (tls) tlsConfig = TlsConfig{certFile, keyFile, caFile};
+
+    GrpcServerThread grpcThread{port, tlsConfig, allowlist};
     Log(info, "Starting gRPC Server at port {}", port);
     grpcThread.start();
 
-    // Run the Qt event loop
     rc = qt_app.exec();
 
     Log(info, "Stopping gRPC Server");
     grpcThread.stop();
 
-    
-    Log(info,"Stopping application {}", appName);
-    TermLogging();  // Terminate logging 
+    Log(info, "Stopping application {}", appName);
+    TermLogging();
     return rc;
 }
-

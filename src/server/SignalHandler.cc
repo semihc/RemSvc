@@ -7,7 +7,7 @@
 #include "SignalHandler.hh"
 
 #include <QCoreApplication>
-#include <QDebug>
+#include "Log.hh"
 
 // ── Platform-specific includes ────────────────────────────────────────────────
 #ifdef Q_OS_WIN
@@ -104,7 +104,7 @@ void SignalHandler::handleSignal()
     (void)::read(signalFd[0], &data, sizeof(data));
 #endif
 
-    qDebug() << "Signal received — requesting application quit";
+    Log(RS::info, "Signal received — requesting application quit");
     emit quitRequested();
 }
 

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <chrono>
 
 #include "RemSvcServiceImpl.hh"
 
@@ -10,9 +12,11 @@
 // ---------------------------------------------------------------------------
 
 // Fake runner that immediately returns controlled output — no process spawned.
+// The cmdusr parameter is captured for inspection by tests that need it.
 static RS::CmdRunner makeFakeRunner(std::string out, std::string err, int rc)
 {
-    return [out, err, rc](std::string_view, int, std::string& o, std::string& e) {
+    return [out, err, rc](std::string_view, int, std::string_view,
+                          std::string& o, std::string& e) {
         o = out;
         e = err;
         return rc;
@@ -61,7 +65,8 @@ TEST(RemSvcServiceImpl, RemCmdSetsNonZeroReturnCode)
 TEST(RemSvcServiceImpl, RemCmdForwardsCommandToRunner)
 {
     std::string captured;
-    auto spy = [&captured](std::string_view cmd, int, std::string& out, std::string& err) {
+    auto spy = [&captured](std::string_view cmd, int, std::string_view,
+                           std::string& out, std::string& err) {
         captured = std::string(cmd);
         out = "";  err = "";
         return 0;
@@ -80,7 +85,8 @@ TEST(RemSvcServiceImpl, RemCmdForwardsCommandToRunner)
 TEST(RemSvcServiceImpl, RemCmdForwardsCmdTypToRunner)
 {
     int capturedTyp = -1;
-    auto spy = [&capturedTyp](std::string_view, int cmdtyp, std::string& out, std::string& err) {
+    auto spy = [&capturedTyp](std::string_view, int cmdtyp, std::string_view,
+                              std::string& out, std::string& err) {
         capturedTyp = cmdtyp;
         out = "";  err = "";
         return 0;
@@ -101,6 +107,53 @@ TEST(RemSvcServiceImpl, RemCmdForwardsCmdTypToRunner)
         svc.RemCmd(&ctx, &req, &res);
         EXPECT_EQ(capturedTyp, 1);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// RemCmd — cmdusr forwarding
+// ---------------------------------------------------------------------------
+
+TEST(RemSvcServiceImpl, RemCmdForwardsCmdusr)
+{
+    std::string capturedUser;
+    auto spy = [&capturedUser](std::string_view, int, std::string_view cmdusr,
+                               std::string& out, std::string& err) {
+        capturedUser = std::string(cmdusr);
+        out = "";  err = "";
+        return 0;
+    };
+
+    RS::RemSvcServiceImpl svc(spy);
+    RS::RemCmdMsg req;
+    req.set_cmd("echo hi");
+    req.set_cmdusr("deploy");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_EQ(capturedUser, "deploy");
+}
+
+TEST(RemSvcServiceImpl, RemCmdForwardsEmptyCmdusr)
+{
+    std::string capturedUser{"unset"};
+    auto spy = [&capturedUser](std::string_view, int, std::string_view cmdusr,
+                               std::string& out, std::string& err) {
+        capturedUser = std::string(cmdusr);
+        out = "";  err = "";
+        return 0;
+    };
+
+    RS::RemSvcServiceImpl svc(spy);
+    RS::RemCmdMsg req;  req.set_cmd("echo hi");  // cmdusr left empty
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_EQ(capturedUser, "");
 }
 
 
@@ -234,7 +287,7 @@ TEST(RemSvcServiceImpl, GetStatusReturnsOk)
     EXPECT_EQ(res.rc(), 0);
 }
 
-TEST(RemSvcServiceImpl, GetStatusMsgIsNonEmpty)
+TEST(RemSvcServiceImpl, GetStatusMsgContainsStateOK)
 {
     RS::RemSvcServiceImpl svc;
     RS::Empty req;
@@ -243,7 +296,139 @@ TEST(RemSvcServiceImpl, GetStatusMsgIsNonEmpty)
 
     svc.GetStatus(&ctx, &req, &res);
 
-    EXPECT_FALSE(res.msg().empty());
+    EXPECT_NE(res.msg().find("state=OK"), std::string::npos);
+}
+
+TEST(RemSvcServiceImpl, GetStatusMsgContainsUptime)
+{
+    RS::RemSvcServiceImpl svc;
+    RS::Empty req;
+    RS::StatusMsg res;
+    grpc::ServerContext ctx;
+
+    svc.GetStatus(&ctx, &req, &res);
+
+    EXPECT_NE(res.msg().find("uptime="), std::string::npos);
+}
+
+TEST(RemSvcServiceImpl, GetStatusMsgContainsCommandCount)
+{
+    RS::RemSvcServiceImpl svc(makeFakeRunner("", "", 0));
+    grpc::ServerContext ctx;
+
+    // Execute two commands so the counter advances.
+    { RS::RemCmdMsg req; req.set_cmd("a"); RS::RemResMsg res; svc.RemCmd(&ctx, &req, &res); }
+    { RS::RemCmdMsg req; req.set_cmd("b"); RS::RemResMsg res; svc.RemCmd(&ctx, &req, &res); }
+
+    RS::Empty sreq;
+    RS::StatusMsg sres;
+    svc.GetStatus(&ctx, &sreq, &sres);
+
+    EXPECT_NE(sres.msg().find("commands=2"), std::string::npos);
+}
+
+
+// ---------------------------------------------------------------------------
+// Allowlist
+// ---------------------------------------------------------------------------
+
+TEST(RemSvcServiceImpl, AllowlistEmptyPermitsAllCommands)
+{
+    // No allowlist — any command runs.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {});
+    RS::RemCmdMsg req;  req.set_cmd("anything");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(res.out(), "ok");
+}
+
+TEST(RemSvcServiceImpl, AllowlistPermitsMatchingPattern)
+{
+    // Regex: command must start with "echo" or "dir"
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b", "^dir\\b"});
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(res.out(), "ok");
+}
+
+TEST(RemSvcServiceImpl, AllowlistBlocksNonMatchingCommand)
+{
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b"});
+    RS::RemCmdMsg req;  req.set_cmd("rm -rf /");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_EQ(res.out(), "");   // runner must NOT have been called
+}
+
+TEST(RemSvcServiceImpl, AllowlistRegexMatchesSubstring)
+{
+    // Pattern without anchoring matches anywhere in the command.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"Get-\\w+"});
+    RS::RemCmdMsg req;  req.set_cmd("Get-Date");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    EXPECT_TRUE(svc.RemCmd(&ctx, &req, &res).ok());
+}
+
+// ---------------------------------------------------------------------------
+// Output truncation (256 KB limit)
+// ---------------------------------------------------------------------------
+
+TEST(RemSvcServiceImpl, OutputTruncatedAt256KB)
+{
+    const std::string big(RS::kMaxOutputBytes + 100, 'x');
+    RS::RemSvcServiceImpl svc(makeFakeRunner(big, "", 0));
+    RS::RemCmdMsg req;  req.set_cmd("flood");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_LE(res.out().size(), RS::kMaxOutputBytes + 32u);  // + notice headroom
+    EXPECT_NE(res.out().find("[output truncated]"), std::string::npos);
+}
+
+TEST(RemSvcServiceImpl, ErrorTruncatedAt256KB)
+{
+    const std::string big(RS::kMaxOutputBytes + 100, 'e');
+    RS::RemSvcServiceImpl svc(makeFakeRunner("", big, 1));
+    RS::RemCmdMsg req;  req.set_cmd("flood");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_LE(res.err().size(), RS::kMaxOutputBytes + 32u);
+    EXPECT_NE(res.err().find("[output truncated]"), std::string::npos);
+}
+
+TEST(RemSvcServiceImpl, OutputBelowLimitNotTruncated)
+{
+    const std::string small(100, 'x');
+    RS::RemSvcServiceImpl svc(makeFakeRunner(small, "", 0));
+    RS::RemCmdMsg req;  req.set_cmd("small");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_EQ(res.out(), small);
+    EXPECT_EQ(res.out().find("[output truncated]"), std::string::npos);
 }
 
 
@@ -345,6 +530,19 @@ static RS::RemCmdMsg makeReq(std::string cmd, int tid = 0, std::string hsh = "")
 // RemCmdStrm — processStream tests
 // ---------------------------------------------------------------------------
 
+TEST(RemSvcServiceImpl, AllowlistBlocksInStream)
+{
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b"});
+    FakeCmdStream stream;
+    stream.requests = { makeReq("rm -rf /") };
+
+    auto status = svc.processStream(stream);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_TRUE(stream.responses.empty());
+}
+
 TEST(RemSvcServiceImpl, RemCmdStrmEmptyStreamReturnsOk)
 {
     RS::RemSvcServiceImpl svc(makeFakeRunner("", "", 0));
@@ -374,7 +572,8 @@ TEST(RemSvcServiceImpl, RemCmdStrmMultipleCommandsInOrder)
 {
     // Runner returns "out_N" for the Nth call.
     int call = 0;
-    auto runner = [&call](std::string_view, int, std::string& out, std::string& err) {
+    auto runner = [&call](std::string_view, int, std::string_view,
+                          std::string& out, std::string& err) {
         out = "out_" + std::to_string(++call);
         err = "";
         return 0;
@@ -423,7 +622,8 @@ TEST(RemSvcServiceImpl, RemCmdStrmHashMismatchAbortsStream)
 {
     // First message has bad hash — stream must stop; second must NOT run.
     int callCount = 0;
-    auto runner = [&callCount](std::string_view, int, std::string& out, std::string& err) {
+    auto runner = [&callCount](std::string_view, int, std::string_view,
+                               std::string& out, std::string& err) {
         ++callCount;  out = "";  err = "";  return 0;
     };
 
@@ -466,4 +666,45 @@ TEST(RemSvcServiceImpl, RemCmdStrmNonZeroReturnCode)
     ASSERT_EQ(stream.responses.size(), 1u);
     EXPECT_EQ(stream.responses[0].rc(),  42);
     EXPECT_EQ(stream.responses[0].err(), "bad");
+}
+
+TEST(RemSvcServiceImpl, RemCmdStrmForwardsCmdusr)
+{
+    std::string capturedUser;
+    auto spy = [&capturedUser](std::string_view, int, std::string_view cmdusr,
+                               std::string& out, std::string& err) {
+        capturedUser = std::string(cmdusr);
+        out = "";  err = "";
+        return 0;
+    };
+
+    RS::RemSvcServiceImpl svc(spy);
+    FakeCmdStream stream;
+    RS::RemCmdMsg req;
+    req.set_cmd("echo hi");
+    req.set_cmdusr("alice");
+    stream.requests = { req };
+
+    svc.processStream(stream);
+
+    EXPECT_EQ(capturedUser, "alice");
+}
+
+TEST(RemSvcServiceImpl, RemCmdStrmEmptyCmdusrForwarded)
+{
+    std::string capturedUser{"unset"};
+    auto spy = [&capturedUser](std::string_view, int, std::string_view cmdusr,
+                               std::string& out, std::string& err) {
+        capturedUser = std::string(cmdusr);
+        out = "";  err = "";
+        return 0;
+    };
+
+    RS::RemSvcServiceImpl svc(spy);
+    FakeCmdStream stream;
+    stream.requests = { makeReq("echo hi") };   // cmdusr left empty
+
+    svc.processStream(stream);
+
+    EXPECT_EQ(capturedUser, "");
 }
