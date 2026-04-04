@@ -1,26 +1,30 @@
-#!/bin/bash
-set -x
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Activate Python venv
-source $HOME/Python311_venv/bin/activate
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROTO_DIR="$REPO_ROOT/src/proto"
+OUT_DIR="$SCRIPT_DIR"
+PROTO_FILE="$PROTO_DIR/RemSvc.proto"
 
+PYTHON="${PYTHON:-python3}"
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    if command -v python >/dev/null 2>&1; then
+        PYTHON=python
+    else
+        echo "Python interpreter not found. Set PYTHON or install Python."
+        exit 1
+    fi
+fi
 
-# Project Directory
-PRJ=/data/airflow/RemSvc
-# Proto Directory
-PD=$PRJ/pro
-# Proto File
-PF=$PD/RemSvc.proto
+if ! "$PYTHON" -m grpc_tools.protoc --version >/dev/null 2>&1; then
+    echo "grpc_tools.protoc is not available in $PYTHON. Install grpcio-tools."
+    exit 1
+fi
 
-# The "protoc" Compiler/Generator
-PC=/data/local/stow/grpc-1.67.0/bin/protoc
-
-# The output directory
-OD=$PRJ/src/pyclient
-
-
-#1
-#$PC --python_out=$OD --grpc_python_out=$OD --mypy_out=$OD --mypy_grpc_out=$OD --plugin=protoc-gen-grpc_python=/home/scemiloglu@internal.bupa.com.au/Python311_venv/bin/protoc-gen-grpclib_python -I $PD RemSvc.proto
-
-#2
-python -m grpc_tools.protoc -I $PD --python_out=$OD --grpc_python_out=$OD $PF
+echo "Generating Python bindings from $PROTO_FILE into $OUT_DIR"
+"$PYTHON" -m grpc_tools.protoc \
+    -I "$PROTO_DIR" \
+    --python_out="$OUT_DIR" \
+    --grpc_python_out="$OUT_DIR" \
+    "$PROTO_FILE"
