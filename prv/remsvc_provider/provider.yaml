@@ -1,14 +1,16 @@
 package-name: airflow-provider-remsvc
 name: RemSvc
 description: |
-  Apache Airflow provider for RemSvc — remote job execution via gRPC.
-  Provides a deferrable operator and async trigger so worker slots are
-  held only for job submission and result fetch, not for polling.
+  Apache Airflow provider for RemSvc — remote command execution via gRPC.
+  Provides a deferrable operator and async trigger that streams commands via
+  RemCmdStrm; worker slots are held only for brief validation and XCom push.
 versions:
   - 1.0.0
 
+min-airflow-version: "3.1.0"
+
 dependencies:
-  - apache-airflow>=2.2.0
+  - apache-airflow>=3.1.0
   - grpcio>=1.51.0
   - grpcio-status>=1.51.0
   - protobuf>=4.0.0

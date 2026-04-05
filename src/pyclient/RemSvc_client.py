@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import time
 import zlib
 
 import grpc
@@ -32,9 +33,12 @@ def buildChannel(server: str, port: int, tls: bool, ca_cert: str = None):
 
 
 async def doPing(stub: RemSvc_pb2_grpc.RemSvcStub, seq: int):
-    request = RemSvc_pb2.PingMsg(seq=seq)
+    sent_time = int(time.time() * 1000)
+    request = RemSvc_pb2.PingMsg(seq=seq, time=sent_time)
     response = await stub.Ping(request, timeout=30.0)
-    print(f"Ping response: seq={response.seq} time={response.time} data={response.data}")
+    rtt_ms = int(time.time() * 1000) - sent_time
+    data_str = response.data.decode("utf-8", errors="replace") if response.data else ""
+    print(f"Ping response: seq={response.seq} time={response.time} rtt={rtt_ms}ms data={data_str}")
 
 
 async def doGetStatus(stub: RemSvc_pb2_grpc.RemSvcStub):
@@ -47,18 +51,20 @@ async def doRemCmd(stub: RemSvc_pb2_grpc.RemSvcStub,
                  cmd: str,
                  cmdtyp: int,
                  tid: int,
-                 cmdusr: str):
+                 cmdusr: str,
+                 src: str):
     request = RemSvc_pb2.RemCmdMsg(
         cmd=cmd,
         cmdtyp=cmdtyp,
         tid=tid,
         hsh=crc32Hex(cmd),
+        src=src,
     )
     if cmdusr:
         request.cmdusr = cmdusr
 
     response = await stub.RemCmd(request, timeout=30.0)
-    print(f"Response: rc={response.rc}")
+    print(f"Response: rc={response.rc} hsh={response.hsh}")
     if response.out:
         print(f"stdout:\n{response.out}")
     if response.err:
@@ -68,13 +74,14 @@ async def doRemCmd(stub: RemSvc_pb2_grpc.RemSvcStub,
 async def doCmdStream(stub: RemSvc_pb2_grpc.RemSvcStub,
                         cmds: list[str],
                         cmdtyp: int,
-                        cmdusr: str):
+                        cmdusr: str,
+                        src: str):
     stream = stub.RemCmdStrm()
 
     async def readResponses():
         try:
             async for response in stream:
-                print(f"Response: tid={response.tid} rc={response.rc}")
+                print(f"Response: tid={response.tid} rc={response.rc} hsh={response.hsh}")
                 if response.out:
                     print(f"stdout:\n{response.out}")
                 if response.err:
@@ -90,6 +97,7 @@ async def doCmdStream(stub: RemSvc_pb2_grpc.RemSvcStub,
             cmdtyp=cmdtyp,
             tid=index,
             hsh=crc32Hex(cmd),
+            src=src,
         )
         if cmdusr:
             request.cmdusr = cmdusr
@@ -119,6 +127,8 @@ async def main():
                         help="OS user to execute the command as (Linux only)")
     parser.add_argument("--stream", action="store_true",
                         help="Use bidirectional streaming RemCmdStrm")
+    parser.add_argument("--src", type=str, default="",
+                        help="Source identifier sent with each command request")
     parser.add_argument("--tls", action="store_true",
                         help="Connect using TLS")
     parser.add_argument("--ca-cert", type=str, default="",
@@ -136,11 +146,11 @@ async def main():
 
     if args.cmd:
         if args.stream:
-            await doCmdStream(stub, args.cmd, args.cmdtyp, args.user)
+            await doCmdStream(stub, args.cmd, args.cmdtyp, args.user, args.src)
         else:
             for index, cmd in enumerate(args.cmd, start=1):
                 tid = args.tid if args.tid else index
-                await doRemCmd(stub, cmd, args.cmdtyp, tid, args.user)
+                await doRemCmd(stub, cmd, args.cmdtyp, tid, args.user, args.src)
 
     await channel.close()
 

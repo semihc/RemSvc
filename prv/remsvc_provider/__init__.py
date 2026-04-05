@@ -12,6 +12,7 @@ def get_provider_info() -> dict:
     return {
         "package-name": "airflow-provider-remsvc",
         "name": "RemSvc",
-        "description": "Remote job execution for Apache Airflow via RemSvc gRPC.",
+        "description": "Remote command execution for Apache Airflow via RemSvc gRPC.",
         "versions": ["1.0.0"],
+        "min-airflow-version": "3.1.0",
     }

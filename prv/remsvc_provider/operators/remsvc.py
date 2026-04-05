@@ -5,13 +5,15 @@ Deferrable RemSvcOperator for Apache Airflow.
 
 Execution flow
 --------------
-1. execute()          — submit the job synchronously (fast), then defer.
+1. execute()          — validate inputs, defer to RemSvcTrigger.
                         Worker slot is released immediately after TaskDeferred.
-2. [triggerer]        — RemSvcTrigger polls asynchronously until terminal state.
-3. execute_complete() — worker resumes, fetches result, pushes to XCom.
+2. [triggerer]        — RemSvcTrigger opens a RemCmdStrm bidirectional stream,
+                        concurrently sends all commands and reads all responses,
+                        correlating each response to its command via ``tid``.
+3. execute_complete() — worker resumes, receives correlated results, pushes to XCom.
 
-The worker holds its slot only during step 1 (a single SubmitJob RPC) and
-step 3 (a single GetResult RPC).  All waiting happens in the triggerer.
+The worker holds its slot only during steps 1 and 3 (brief validation + XCom push).
+All command execution and waiting happens in the triggerer process.
 
 Repo layout context
 -------------------
@@ -26,33 +28,28 @@ Repo layout context
 
 Requirements
 ------------
-  Apache Airflow >= 2.2  (TaskDeferred / deferrable operators)
+  Apache Airflow >= 3.1  (Python 3.10+)
   grpcio, grpcio-status
 """
 
 from __future__ import annotations
 
 import logging
+import zlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Optional, Sequence
-
-import grpc
-from google.protobuf.message import Message
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from airflow.exceptions import AirflowException
 from airflow.models import BaseOperator
-from airflow.providers.grpc.hooks.grpc import GrpcHook
 from airflow.utils.context import Context
 
-# Stubs are generated from RemSvc/src/proto/ into RemSvc/prv/remsvc_proto/
+# Check that stubs have been generated — actual proto types are used in the trigger.
 try:
-    from remsvc_proto import remsvc_pb2 as pb2              # type: ignore
-    from remsvc_proto import remsvc_pb2_grpc as pb2_grpc    # type: ignore
+    import remsvc_proto.remsvc_pb2  # type: ignore  # noqa: F401
     _PROTO_AVAILABLE = True
 except ImportError:
-    pb2 = None          # type: ignore[assignment]
-    pb2_grpc = None     # type: ignore[assignment]
     _PROTO_AVAILABLE = False
 
 log = logging.getLogger(__name__)
@@ -63,44 +60,26 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class JobState(str, Enum):
-    PENDING   = "PENDING"
-    RUNNING   = "RUNNING"
     SUCCESS   = "SUCCESS"
     FAILED    = "FAILED"
     CANCELLED = "CANCELLED"
 
-    @classmethod
-    def terminal(cls) -> frozenset["JobState"]:
-        return frozenset({cls.SUCCESS, cls.FAILED, cls.CANCELLED})
 
-    @classmethod
-    def from_proto(cls, proto_state: int) -> "JobState":
-        """Map protobuf enum int to JobState."""
-        mapping = {
-            0: cls.PENDING,
-            1: cls.RUNNING,
-            2: cls.SUCCESS,
-            3: cls.FAILED,
-            4: cls.CANCELLED,
-        }
-        return mapping.get(proto_state, cls.PENDING)
+def crc32hex(data: str) -> str:
+    return format(zlib.crc32(data.encode("utf-8")) & 0xFFFFFFFF, "08x")
 
 
 @dataclass
 class RemSvcResult:
     """Structured result pushed to XCom."""
-    job_id:    str
     state:     str
-    output:    Any                = None
-    metadata:  Dict[str, str]     = field(default_factory=dict)
-    error_msg: Optional[str]      = None
+    results:   list[dict[str, Any]] = field(default_factory=list)
+    error_msg: str | None        = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "job_id":    self.job_id,
             "state":     self.state,
-            "output":    self.output,
-            "metadata":  self.metadata,
+            "results":   self.results,
             "error_msg": self.error_msg,
         }
 
@@ -110,68 +89,69 @@ class RemSvcResult:
 # ---------------------------------------------------------------------------
 
 class RemSvcOperator(BaseOperator):
-    """Deferrable operator that submits a job to RemSvc and waits via the
-    Airflow triggerer — no worker slot held during polling.
+    """Deferrable operator that executes one or more remote commands via the
+    RemSvc bidirectional streaming RPC (``RemCmdStrm``).
+
+    All commands are sent over a single stream; responses are correlated back
+    to their originating command via the ``tid`` field (1-based index in the
+    ``commands`` list).  Responses may arrive in any order — the trigger
+    collects them all before firing the completion event.
 
     Parameters
     ----------
+    commands:
+        List of command dicts forwarded to ``RemCmdMsg``.  Each dict must
+        contain at least ``cmd`` (str).  Optional fields: ``cmdtyp`` (int,
+        0=native shell, 1=PowerShell), ``cmdusr`` (str), ``src`` (str).
+        Jinja-templated.
     grpc_conn_id:
-        Airflow connection ID of type ``grpc``.
-    job_payload:
-        Dict forwarded to ``SubmitJobRequest``.  Jinja-templated.
-    poll_interval:
-        Seconds between async ``GetStatus`` polls in the triggerer (default 10 s).
-    poll_timeout:
-        Maximum seconds the trigger will wait before firing a timeout event
-        (default 3600 s).
-    request_timeout:
-        Per-RPC deadline in seconds (default 30 s).
+        Airflow connection ID of type ``remsvc``.
+    stream_timeout:
+        Maximum seconds for the entire stream, enforced at both the Python
+        asyncio level and as the gRPC deadline on the stream (default 3600 s).
     result_handler:
-        Optional ``(GetResultResponse) -> Any`` transformer applied before XCom.
-    xcom_key:
-        XCom key (default ``"return_value"``).
+        Optional callable applied to the raw ``{tid: result_dict}`` mapping
+        before it is stored in XCom.  Defaults to a sorted list by tid.
     metadata:
-        Optional gRPC call metadata sequence.
+        Optional gRPC call metadata sequence (e.g. bearer tokens).
+        Jinja-templated.
 
     Examples
     --------
-    >>> run = RemSvcOperator(
+    >>> op = RemSvcOperator(
     ...     task_id="run_remote",
     ...     grpc_conn_id="remsvc_prod",
-    ...     job_payload={"script": "process.py", "args": ["--date", "{{ ds }}"]},
+    ...     commands=[
+    ...         {"cmd": "echo {{ ds }}", "cmdtyp": 0},
+    ...         {"cmd": "hostname",      "cmdtyp": 0},
+    ...     ],
     ...     dag=dag,
     ... )
     """
 
-    template_fields: Sequence[str] = ("job_payload", "metadata")
-    template_fields_renderers = {"job_payload": "json"}
+    template_fields: Sequence[str] = ("commands", "metadata")
+    template_fields_renderers = {"commands": "json"}
     ui_color = "#8f70d4"
 
     def __init__(
         self,
         *,
-        grpc_conn_id:    str = "remsvc_default",
-        job_payload:     Dict[str, Any],
-        poll_interval:   float = 10.0,
-        poll_timeout:    float = 3600.0,
-        request_timeout: float = 30.0,
-        result_handler:  Optional[Callable[[Any], Any]] = None,
-        xcom_key:        str = "return_value",
-        metadata:        Optional[Sequence[tuple[str, str]]] = None,
+        grpc_conn_id:   str = "remsvc_default",
+        commands:       list[dict[str, Any]],
+        stream_timeout: float = 3600.0,
+        result_handler: Callable[[Any], Any] | None = None,
+        metadata:       Sequence[tuple[str, str]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.grpc_conn_id    = grpc_conn_id
-        self.job_payload     = job_payload
-        self.poll_interval   = poll_interval
-        self.poll_timeout    = poll_timeout
-        self.request_timeout = request_timeout
-        self.result_handler  = result_handler or self._default_result_handler
-        self.xcom_key        = xcom_key
-        self.metadata        = list(metadata or [])
+        self.grpc_conn_id   = grpc_conn_id
+        self.commands       = commands
+        self.stream_timeout = stream_timeout
+        self.result_handler = result_handler or self._default_result_handler
+        self.metadata       = list(metadata or [])
 
     # ------------------------------------------------------------------
-    # Phase 1: submit → defer  (runs on a worker, briefly)
+    # Phase 1: validate → defer  (runs on a worker, briefly)
     # ------------------------------------------------------------------
 
     def execute(self, context: Context) -> None:
@@ -181,104 +161,66 @@ class RemSvcOperator(BaseOperator):
                 "Run regen_proto.sh against RemSvc/src/proto/ and ensure "
                 "the output is at RemSvc/prv/remsvc_proto/."
             )
-
-        job_id = self._submit_job()
-        log.info("RemSvc job submitted. job_id=%s  Deferring to triggerer.", job_id)
-
-        # Push job_id immediately — visible in the Airflow UI while DEFERRED
-        context["task_instance"].xcom_push(key="job_id", value=job_id)
+        if not self.commands:
+            raise AirflowException("RemSvcOperator: 'commands' must not be empty.")
 
         # Deferred import to avoid circular dependency at module load time
         from remsvc_provider.triggers.remsvc import RemSvcTrigger
 
-        # Hand off to the triggerer; worker slot is released here.
+        log.info(
+            "RemSvcOperator: deferring %d command(s) to triggerer.",
+            len(self.commands),
+        )
         self.defer(
             trigger=RemSvcTrigger(
-                job_id          = job_id,
-                grpc_conn_id    = self.grpc_conn_id,
-                poll_interval   = self.poll_interval,
-                poll_timeout    = self.poll_timeout,
-                request_timeout = self.request_timeout,
-                metadata        = self.metadata,
+                commands       = self.commands,
+                grpc_conn_id   = self.grpc_conn_id,
+                stream_timeout = self.stream_timeout,
+                metadata       = self.metadata,
             ),
             method_name="execute_complete",
         )
         # Unreachable — self.defer() raises TaskDeferred internally.
 
     # ------------------------------------------------------------------
-    # Phase 3: resume → fetch → XCom  (runs on a worker, briefly)
+    # Phase 3: resume → XCom  (runs on a worker, briefly)
     # ------------------------------------------------------------------
 
     def execute_complete(
         self,
         context: Context,
-        event:   Dict[str, Any],
-    ) -> Dict[str, Any]:
+        event:   dict[str, Any],
+    ) -> dict[str, Any]:
         """Called by Airflow when the trigger fires a TriggerEvent.
 
         ``event`` is the dict yielded by ``RemSvcTrigger.run()``.
         """
-        from remsvc_provider.triggers.remsvc import EVT_ERROR, EVT_JOB_ID, EVT_STATE
+        from remsvc_provider.triggers.remsvc import EVT_ERROR, EVT_RESULTS, EVT_STATE
 
-        job_id = event.get(EVT_JOB_ID, "<unknown>")
-        state  = JobState(event.get(EVT_STATE, JobState.FAILED.value))
-        error  = event.get(EVT_ERROR)
+        state   = JobState(event.get(EVT_STATE, JobState.FAILED.value))
+        error   = event.get(EVT_ERROR)
+        raw     = event.get(EVT_RESULTS, {})
 
         if state != JobState.SUCCESS:
-            msg = f"RemSvc job {job_id!r} ended with state {state.value}."
+            msg = f"RemSvc commands ended with state {state.value}."
             if error:
-                msg += f"  Trigger error: {error}"
+                msg += f"  Detail: {error}"
             raise AirflowException(msg)
 
-        log.info("RemSvc job succeeded. job_id=%s  Fetching result.", job_id)
-        raw_result = self._fetch_result(job_id)
+        log.info("RemSvc commands completed successfully (%d result(s)).", len(raw))
         result = RemSvcResult(
-            job_id = job_id,
-            state  = state.value,
-            output = self.result_handler(raw_result),
+            state   = state.value,
+            results = self.result_handler(raw),
         )
-
-        log.info("RemSvc result fetched. job_id=%s", job_id)
         return result.to_dict()
-
-    # ------------------------------------------------------------------
-    # Synchronous gRPC helpers
-    # ------------------------------------------------------------------
-
-    def _get_hook(self) -> GrpcHook:
-        return GrpcHook(grpc_conn_id=self.grpc_conn_id)
-
-    def _stub(self, channel: grpc.Channel) -> Any:
-        return pb2_grpc.RemSvcStub(channel)  # type: ignore[attr-defined]
-
-    def _submit_job(self) -> str:
-        with self._get_hook().get_conn() as channel:
-            stub     = self._stub(channel)
-            request  = pb2.SubmitJobRequest(**self.job_payload)   # type: ignore[attr-defined]
-            response = stub.SubmitJob(
-                request,
-                timeout  = self.request_timeout,
-                metadata = self.metadata,
-            )
-            return response.job_id
-
-    def _fetch_result(self, job_id: str) -> Any:
-        with self._get_hook().get_conn() as channel:
-            stub    = self._stub(channel)
-            request = pb2.GetResultRequest(job_id=job_id)         # type: ignore[attr-defined]
-            return stub.GetResult(
-                request,
-                timeout  = self.request_timeout,
-                metadata = self.metadata,
-            )
 
     # ------------------------------------------------------------------
     # Result transformation
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _default_result_handler(response: Any) -> Any:
-        if isinstance(response, Message):
-            from google.protobuf.json_format import MessageToDict
-            return MessageToDict(response, preserving_proto_field_name=True)
-        return response
+    def _default_result_handler(
+        results: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert ``{tid: result_dict}`` to a list sorted ascending by tid."""
+        return [v for _, v in sorted(results.items())]

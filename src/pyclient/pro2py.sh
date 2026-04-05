@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Activate Python venv
+source $HOME/Python311_venv/bin/activate
+
+# The "protoc" Compiler/Generator
+PC=/data/local/stow/grpc-1.67.0/bin/protoc
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROTO_DIR="$REPO_ROOT/src/proto"
