@@ -93,6 +93,14 @@ int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
         return 1;
     }
 
+    // Close the write end of stdin immediately so the child receives EOF on
+    // its stdin file descriptor.  Without this, QProcess leaves the stdin pipe
+    // open and any command that reads from stdin (cat, read, pause, Get-Content
+    // …) will block until the cmdTimeoutMs deadline fires, stalling the entire
+    // stream for that duration.  With EOF delivered at process start, such
+    // commands exit promptly (typically rc=0 or rc=1) rather than hanging.
+    prg.closeWriteChannel();
+
     // Drain stdout and stderr incrementally while the process runs.
     //
     // Calling waitForFinished() alone can deadlock when the child writes more

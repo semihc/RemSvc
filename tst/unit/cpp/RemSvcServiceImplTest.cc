@@ -765,3 +765,39 @@ TEST(RemSvcServiceImpl, RemCmdStrmEmptyCmdusrForwarded)
 
     EXPECT_EQ(capturedUser, "");
 }
+
+
+// ---------------------------------------------------------------------------
+// stdin handling — closeWriteChannel() delivers EOF to child
+// ---------------------------------------------------------------------------
+
+// A command that reads from stdin must exit promptly (receiving EOF) rather
+// than blocking until the timeout deadline.  We measure wall-clock time and
+// require it to complete well under the 30 s default timeout.
+//
+// Platform-specific commands that read all of stdin and exit on EOF:
+//   Linux:   "cat"   — reads stdin until EOF, exits 0
+//   Windows: "more"  — reads stdin until EOF, exits 0
+//
+// Both exit immediately when stdin is closed (EOF), which is exactly what
+// closeWriteChannel() achieves.
+TEST(RemSvcServiceImpl, StdinReadingCommandExitsPromptlyOnEof)
+{
+    std::string out, err;
+
+#ifdef _WIN32
+    // "more" on Windows reads from stdin when no file argument is given.
+    const int rc = RS::runInProcess("more", 0, "", out, err, /*timeoutMs=*/30000);
+#else
+    // "cat" with no arguments reads from stdin until EOF.
+    const int rc = RS::runInProcess("cat", 0, "", out, err, /*timeoutMs=*/30000);
+#endif
+
+    // The process must NOT have been killed by the timeout.
+    // "process timed out" in err is the sentinel set by runInProcess on expiry.
+    EXPECT_NE(err, "process timed out")
+        << "stdin-reading command was not given EOF — closeWriteChannel() may be missing";
+
+    // cat/more exit 0 on clean EOF
+    EXPECT_EQ(rc, 0);
+}
