@@ -17,9 +17,18 @@
 
 namespace RS {
 
-// Maximum bytes returned in out/err fields.  Output beyond this is replaced
-// with a truncation notice.  Keeps gRPC messages bounded to a sane size.
+// Maximum bytes returned in out/err fields.  Output beyond this is truncated
+// and a sentinel notice is appended.  Keeps gRPC messages bounded to a sane size.
 static constexpr std::size_t kMaxOutputBytes = 256 * 1024;
+
+// Appended to truncated output.  The U+0001 SOH bytes act as sentinels: this
+// exact sequence is practically impossible to appear in real command output
+// (SOH is never emitted by shells, compilers, or standard text tools).
+// Any downstream consumer seeing this marker can reliably detect truncation
+// without risking a false positive from legitimate output that happens to
+// contain the bracketed message.
+static constexpr std::string_view kTruncationMarker =
+    "\n\x01[remSvc: output truncated at 262144 bytes]\x01\n";
 
 // Signature of a function that runs a shell command and captures output.
 // cmd:    the command string to execute.
@@ -35,8 +44,10 @@ using CmdRunner = std::function<int(std::string_view cmd,
 
 // Default runner — routes to native shell or PowerShell based on cmdtyp,
 // and switches to cmdusr (if non-empty) on Linux via setuid/setgid.
+// timeoutMs: the child process is forcibly killed if it has not exited within
+//            this many milliseconds (default 30 000 ms = 30 s).
 int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
-                 std::string& out, std::string& err);
+                 std::string& out, std::string& err, int timeoutMs = 30000);
 
 
 // Minimal interface for a bidirectional RemCmd stream.
@@ -81,6 +92,10 @@ public:
 private:
     CmdRunner               m_runner;
     std::vector<std::regex> m_allowlist;   // compiled from constructor patterns
+    // True if any allowlist pattern failed to compile.  When set, checkAllowed()
+    // denies every command — fail-safe behaviour prevents bad config from opening
+    // an unintended hole.
+    bool                    m_denyAll{false};
     std::atomic<int64_t>    m_commandsExecuted{0};
     std::chrono::steady_clock::time_point m_startTime;
 

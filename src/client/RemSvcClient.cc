@@ -164,15 +164,19 @@ int RemSvcClient::doRemCmdStrm(const vector<string>& cmds, int cmdtyp,
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
     auto stream = stub_->RemCmdStrm(&ctx);
 
-    // Send all commands (each with its CRC32 hash and cmdusr), then signal end-of-writes.
+    // Send all commands (each with its 1-based tid, CRC32 hash, and cmdusr),
+    // then signal end-of-writes.  tid starts at 1 so the server can correlate
+    // each response back to its originating command (tid=0 is reserved/unset).
+    int tid = 0;
     for (const auto& cmd : cmds) {
         RemCmdMsg req;
         req.set_cmd(cmd);
         req.set_cmdtyp(cmdtyp);
+        req.set_tid(++tid);
         req.set_hsh(crc32Hex(cmd));
         if (!cmdusr.empty())
             req.set_cmdusr(string(cmdusr));
-        Log(info, "RemCmdStrm sending cmd={} usr={}", cmd, cmdusr);
+        Log(info, "RemCmdStrm sending tid={} cmd={} usr={}", tid, cmd, cmdusr);
         if (!stream->Write(req)) {
             Log(error, "RemCmdStrm write failed");
             break;

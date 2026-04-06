@@ -4,7 +4,10 @@
 
 # Static library containing the service implementation.
 # Linked by both the server binary and unit tests.
-add_library(remsvc_impl STATIC RemSvcServiceImpl.cc)
+add_library(remsvc_impl STATIC
+  RemSvcServiceImpl.cc
+  AuthInterceptor.cc
+)
 target_include_directories(remsvc_impl PUBLIC .)
 target_link_libraries(remsvc_impl PUBLIC
   RemSvc

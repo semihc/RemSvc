@@ -18,7 +18,7 @@ echo "Stub output  : ${STUB_OUT}"
 mkdir -p "${STUB_OUT}"
 touch "${STUB_OUT}/__init__.py"
 
-python -m grpc_tools.protoc \
+python3 -m grpc_tools.protoc \
     -I "${PROTO_SRC}" \
     --python_out="${STUB_OUT}" \
     --grpc_python_out="${STUB_OUT}" \

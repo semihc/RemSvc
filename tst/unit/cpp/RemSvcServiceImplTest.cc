@@ -385,6 +385,52 @@ TEST(RemSvcServiceImpl, AllowlistRegexMatchesSubstring)
     EXPECT_TRUE(svc.RemCmd(&ctx, &req, &res).ok());
 }
 
+TEST(RemSvcServiceImpl, AllowlistBadRegexActivatesDenyAll)
+{
+    // "[" is an invalid ECMAScript regex — construction must not throw but must
+    // silently activate deny-all mode so the server stays up while rejecting
+    // every command until the config is corrected.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"["}); // invalid pattern
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_NE(status.error_message().find("invalid"), std::string::npos);
+    EXPECT_EQ(res.out(), "");   // runner must NOT have been called
+}
+
+TEST(RemSvcServiceImpl, AllowlistBadRegexBlocksStreamToo)
+{
+    // Same deny-all must apply to processStream, not just RemCmd.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"["}); // invalid
+    FakeCmdStream stream;
+    stream.requests = { makeReq("echo hi") };
+
+    auto status = svc.processStream(stream);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_TRUE(stream.responses.empty());
+}
+
+TEST(RemSvcServiceImpl, AllowlistMixedValidAndBadPatternDeniesAll)
+{
+    // Even if the first pattern is valid, a later bad pattern triggers deny-all.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b", "[bad"});
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+}
+
 // ---------------------------------------------------------------------------
 // Output truncation (256 KB limit)
 // ---------------------------------------------------------------------------
@@ -399,8 +445,11 @@ TEST(RemSvcServiceImpl, OutputTruncatedAt256KB)
 
     svc.RemCmd(&ctx, &req, &res);
 
-    EXPECT_LE(res.out().size(), RS::kMaxOutputBytes + 32u);  // + notice headroom
-    EXPECT_NE(res.out().find("[output truncated]"), std::string::npos);
+    // Truncated at kMaxOutputBytes then the sentinel marker appended.
+    EXPECT_EQ(res.out().size(), RS::kMaxOutputBytes + RS::kTruncationMarker.size());
+    EXPECT_NE(res.out().find(std::string(RS::kTruncationMarker)), std::string::npos);
+    // SOH sentinel bytes present at start and end of the marker.
+    EXPECT_NE(res.out().find('\x01'), std::string::npos);
 }
 
 TEST(RemSvcServiceImpl, ErrorTruncatedAt256KB)
@@ -413,8 +462,8 @@ TEST(RemSvcServiceImpl, ErrorTruncatedAt256KB)
 
     svc.RemCmd(&ctx, &req, &res);
 
-    EXPECT_LE(res.err().size(), RS::kMaxOutputBytes + 32u);
-    EXPECT_NE(res.err().find("[output truncated]"), std::string::npos);
+    EXPECT_EQ(res.err().size(), RS::kMaxOutputBytes + RS::kTruncationMarker.size());
+    EXPECT_NE(res.err().find(std::string(RS::kTruncationMarker)), std::string::npos);
 }
 
 TEST(RemSvcServiceImpl, OutputBelowLimitNotTruncated)
@@ -428,7 +477,15 @@ TEST(RemSvcServiceImpl, OutputBelowLimitNotTruncated)
     svc.RemCmd(&ctx, &req, &res);
 
     EXPECT_EQ(res.out(), small);
-    EXPECT_EQ(res.out().find("[output truncated]"), std::string::npos);
+    EXPECT_EQ(res.out().find('\x01'), std::string::npos);  // no sentinel
+}
+
+TEST(RemSvcServiceImpl, TruncationMarkerContainsSentinelBytes)
+{
+    // Verify the marker itself has the SOH bytes that make it unambiguous.
+    EXPECT_EQ(RS::kTruncationMarker.front(), '\x01');
+    EXPECT_EQ(RS::kTruncationMarker.back(),  '\n');
+    EXPECT_NE(RS::kTruncationMarker.find('\x01'), std::string_view::npos);
 }
 
 

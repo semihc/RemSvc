@@ -29,9 +29,12 @@ std::string readFile(const std::string& path) {
 
 
 GrpcServerThread::GrpcServerThread(int port,
-                                   std::optional<TlsConfig> tls,
-                                   std::vector<std::string> allowlist)
+                                   std::optional<TlsConfig>          tls,
+                                   std::vector<std::string>           allowlist,
+                                   std::map<std::string, std::string> authTokens,
+                                   int                                cmdTimeoutMs)
     : m_port(port)
+    , m_cmdTimeoutMs(cmdTimeoutMs)
 {
     string server_address = absl::StrFormat("0.0.0.0:%d", port);
 
@@ -58,9 +61,25 @@ GrpcServerThread::GrpcServerThread(int port,
     } else {
         creds = grpc::InsecureServerCredentials();
     }
+
+    // Attach the bearer-token auth processor to the credentials.
+    // AuthMetadataProcessor::Process() is called before any service handler,
+    // for every RPC, regardless of TLS mode.
+    auto authProc = std::make_shared<RS::BearerTokenAuthProcessor>(
+        std::move(authTokens));
+    creds->SetAuthMetadataProcessor(authProc);
+
     builder.AddListeningPort(server_address, creds);
 
-    m_service = make_unique<RS::RemSvcServiceImpl>(RS::runInProcess, std::move(allowlist));
+    // Wrap runInProcess with the configured per-command timeout so the
+    // CmdRunner signature stays unchanged.
+    int timeout = cmdTimeoutMs;
+    RS::CmdRunner runner = [timeout](std::string_view cmd, int cmdtyp,
+                                     std::string_view cmdusr,
+                                     std::string& out, std::string& err) {
+        return RS::runInProcess(cmd, cmdtyp, cmdusr, out, err, timeout);
+    };
+    m_service = make_unique<RS::RemSvcServiceImpl>(std::move(runner), std::move(allowlist));
     builder.RegisterService(m_service.get());
 
     m_server = std::move(builder.BuildAndStart());
@@ -79,6 +98,13 @@ void GrpcServerThread::run()
 void GrpcServerThread::stop()
 {
     Log(RS::info, "Stopping gRPC Server...");
-    m_server->Shutdown();
+    // Give active RPCs a grace window to finish before forcing shutdown.
+    // Any stream still open after the deadline is aborted by gRPC.
+    // The grace period is set to twice the configured per-command timeout so
+    // that a command already running at shutdown time has a fair chance to
+    // complete even if a new command started just before the signal arrived.
+    auto deadline = std::chrono::system_clock::now() +
+                    std::chrono::milliseconds(m_cmdTimeoutMs * 2);
+    m_server->Shutdown(deadline);
     wait();
 }

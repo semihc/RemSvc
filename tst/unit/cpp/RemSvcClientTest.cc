@@ -286,3 +286,27 @@ TEST(RemSvcClient, RemCmdStrmEmptyCmdusrNotSet)
     ASSERT_EQ(stub->strmWritten.size(), 1u);
     EXPECT_EQ(stub->strmWritten[0].cmdusr(), "");
 }
+
+TEST(RemSvcClient, RemCmdStrmAssigns1BasedTids)
+{
+    // tid must start at 1 and increment per command so the server can
+    // correlate each response back to its originating command.
+    auto [client, stub] = makeClient();
+
+    client.doRemCmdStrm({"cmd1", "cmd2", "cmd3"});
+
+    ASSERT_EQ(stub->strmWritten.size(), 3u);
+    EXPECT_EQ(stub->strmWritten[0].tid(), 1);
+    EXPECT_EQ(stub->strmWritten[1].tid(), 2);
+    EXPECT_EQ(stub->strmWritten[2].tid(), 3);
+}
+
+TEST(RemSvcClient, RemCmdStrmSingleCommandHasTid1)
+{
+    auto [client, stub] = makeClient();
+
+    client.doRemCmdStrm({"echo hello"});
+
+    ASSERT_EQ(stub->strmWritten.size(), 1u);
+    EXPECT_EQ(stub->strmWritten[0].tid(), 1);
+}

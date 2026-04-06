@@ -5,6 +5,76 @@
 #include <QString>
 #include <QStringList>
 
+#include <cstdlib>
+#include <string>
+
+namespace {
+
+// Expand $VAR and ${VAR} patterns in `s` using the process environment.
+// Unrecognised or empty variable names are left unexpanded.
+// Example:  "$HOME/certs/server.crt"  →  "/home/user/certs/server.crt"
+std::string expandEnvVars(const std::string& s)
+{
+    std::string result;
+    result.reserve(s.size());
+
+    for (std::size_t i = 0; i < s.size(); ) {
+        if (s[i] != '$') {
+            result += s[i++];
+            continue;
+        }
+
+        // '$' found — determine variable name boundaries.
+        ++i;  // skip '$'
+        bool braced = (i < s.size() && s[i] == '{');
+        if (braced) ++i;  // skip '{'
+
+        std::size_t start = i;
+        while (i < s.size()) {
+            char c = s[i];
+            // Variable names: alphanumeric + underscore.
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||  c == '_') {
+                ++i;
+            } else {
+                break;
+            }
+        }
+
+        if (braced) {
+            if (i < s.size() && s[i] == '}') ++i;  // skip '}'
+            else {
+                // Malformed ${...; emit literally and continue.
+                result += "${";
+                result.append(s, start, i - start);
+                continue;
+            }
+        }
+
+        std::string varname(s, start, i - start);
+        if (varname.empty()) {
+            result += '$';  // bare '$' with no name — keep as-is
+            continue;
+        }
+
+        const char* val = std::getenv(varname.c_str());
+        if (val)
+            result += val;
+        else {
+            // Unknown variable — preserve the original token so the admin
+            // can see what failed rather than silently using a wrong path.
+            result += '$';
+            if (braced) result += '{';
+            result += varname;
+            if (braced) result += '}';
+        }
+    }
+
+    return result;
+}
+
+} // anonymous namespace
+
 std::string loadServerConfig(const std::string& path, ServerConfig& cfg)
 {
     if (!QFileInfo::exists(QString::fromStdString(path)))
@@ -18,18 +88,23 @@ std::string loadServerConfig(const std::string& path, ServerConfig& cfg)
     ini.beginGroup("server");
     if (ini.contains("port"))
         cfg.port = ini.value("port").toInt();
+    if (ini.contains("cmd_timeout_ms"))
+        cfg.cmdTimeoutMs = ini.value("cmd_timeout_ms").toInt();
     ini.endGroup();
 
     // ── [tls] ─────────────────────────────────────────────────────────────────
+    // Cert/key/CA paths support $VAR and ${VAR} environment-variable expansion
+    // so that paths like "$HOME/certs/server.crt" work without hardcoding user
+    // home directories into the config file.
     ini.beginGroup("tls");
     if (ini.contains("enabled"))
         cfg.tlsEnabled = ini.value("enabled").toBool();
     if (ini.contains("cert"))
-        cfg.certFile = ini.value("cert").toString().toStdString();
+        cfg.certFile = expandEnvVars(ini.value("cert").toString().toStdString());
     if (ini.contains("key"))
-        cfg.keyFile = ini.value("key").toString().toStdString();
+        cfg.keyFile  = expandEnvVars(ini.value("key").toString().toStdString());
     if (ini.contains("ca"))
-        cfg.caFile = ini.value("ca").toString().toStdString();
+        cfg.caFile   = expandEnvVars(ini.value("ca").toString().toStdString());
     ini.endGroup();
 
     // ── [allowlist] ───────────────────────────────────────────────────────────
@@ -45,6 +120,25 @@ std::string loadServerConfig(const std::string& path, ServerConfig& cfg)
             std::string pat = ini.value(k).toString().toStdString();
             if (!pat.empty())
                 cfg.allowlist.push_back(pat);
+        }
+    }
+    ini.endGroup();
+
+    // ── [auth] ────────────────────────────────────────────────────────────────
+    // Each key is an identity label; each value is the secret bearer token.
+    // Token values support $VAR / ${VAR} expansion so tokens can be stored in
+    // environment variables rather than written in plaintext in the config file:
+    //   airflow-prod = $REMSVC_PROD_TOKEN
+    // An absent or empty section leaves authTokens empty (auth disabled).
+    ini.beginGroup("auth");
+    const QStringList authKeys = ini.childKeys();
+    if (!authKeys.isEmpty()) {
+        cfg.authTokens.clear();
+        for (const QString& identity : authKeys) {
+            std::string token = expandEnvVars(
+                ini.value(identity).toString().toStdString());
+            if (!token.empty())
+                cfg.authTokens.emplace(identity.toStdString(), std::move(token));
         }
     }
     ini.endGroup();

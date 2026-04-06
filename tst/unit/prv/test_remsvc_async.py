@@ -155,24 +155,27 @@ class TestRemSvcTriggerRun:
     @pytest.mark.asyncio
     async def test_run_fires_cancelled_on_timeout(self):
         t = _make_trigger(stream_timeout=0.001)
-        # _run_stream sleeps long enough to trigger the wait_for timeout
-        async def _slow():
+        # Use an Event that never fires — deterministic block without wall-clock sleep
+        async def _block():
             import asyncio as _a
-            await _a.sleep(10)
-        with patch.object(t, "_run_stream", new=_slow):
+            await _a.Event().wait()
+        with patch.object(t, "_run_stream", new=_block):
             events = await _collect(t)
         assert events[0].payload[EVT_STATE]  == JobState.CANCELLED.value
         assert "timed out" in events[0].payload[EVT_ERROR].lower()
 
     @pytest.mark.asyncio
     async def test_run_catches_grpc_error(self):
+        # Use PERMISSION_DENIED (non-retryable) so the trigger fails immediately
+        # without retry loops.  UNAVAILABLE is retried up to _MAX_ATTEMPTS times
+        # and would require patching asyncio.sleep to avoid slow tests.
         t = _make_trigger()
         rpc_error = grpc.aio.AioRpcError(
-            code                 = grpc.StatusCode.UNAVAILABLE,
-            initial_metadata     = grpc.aio.Metadata(),
-            trailing_metadata    = grpc.aio.Metadata(),
-            details              = "connection refused",
-            debug_error_string   = "",
+            code               = grpc.StatusCode.PERMISSION_DENIED,
+            initial_metadata   = grpc.aio.Metadata(),
+            trailing_metadata  = grpc.aio.Metadata(),
+            details            = "access denied",
+            debug_error_string = "",
         )
         with patch.object(t, "_run_stream", new=AsyncMock(side_effect=rpc_error)):
             events = await _collect(t)
@@ -439,6 +442,391 @@ class TestDeferrableRemSvcOperator:
         handler.assert_called_once_with(raw)
         assert result["results"] == [{"transformed": True}]
 
+    def test_execute_raises_when_single_cmd_is_empty_string(self):
+        op  = _make_operator(commands=[{"cmd": ""}])
+        ctx = _mock_context()
+        with patch("remsvc_provider.operators.remsvc._PROTO_AVAILABLE", True):
+            with pytest.raises(AirflowException, match="empty"):
+                op.execute(ctx)
+
+    def test_execute_raises_when_single_cmd_is_whitespace(self):
+        op  = _make_operator(commands=[{"cmd": "   "}])
+        ctx = _mock_context()
+        with patch("remsvc_provider.operators.remsvc._PROTO_AVAILABLE", True):
+            with pytest.raises(AirflowException, match="empty"):
+                op.execute(ctx)
+
+    def test_execute_raises_with_index_of_empty_cmd(self):
+        op  = _make_operator(commands=[_CMD1, {"cmd": ""}, _CMD2])
+        ctx = _mock_context()
+        with patch("remsvc_provider.operators.remsvc._PROTO_AVAILABLE", True):
+            with pytest.raises(AirflowException, match="1"):  # index 1 is empty
+                op.execute(ctx)
+
+    def test_execute_raises_when_cmd_key_missing(self):
+        op  = _make_operator(commands=[{"cmdtyp": 1}])  # no "cmd" key
+        ctx = _mock_context()
+        with patch("remsvc_provider.operators.remsvc._PROTO_AVAILABLE", True):
+            with pytest.raises(AirflowException, match="empty"):
+                op.execute(ctx)
+
+    def test_execute_valid_commands_do_not_raise_empty_check(self):
+        from airflow.exceptions import TaskDeferred
+        op  = _make_operator(commands=[{"cmd": "echo hi"}, {"cmd": "hostname"}])
+        ctx = _mock_context()
+        with patch("remsvc_provider.operators.remsvc._PROTO_AVAILABLE", True):
+            with pytest.raises(TaskDeferred):
+                op.execute(ctx)  # must reach defer, not AirflowException
+
     def test_template_fields_declared(self):
         assert "commands" in RemSvcOperator.template_fields
         assert "metadata" in RemSvcOperator.template_fields
+
+
+# ---------------------------------------------------------------------------
+# RemSvcTrigger — retry logic
+# ---------------------------------------------------------------------------
+
+def _rpc_error(code: grpc.StatusCode, details: str = "") -> grpc.aio.AioRpcError:
+    return grpc.aio.AioRpcError(
+        code               = code,
+        initial_metadata   = grpc.aio.Metadata(),
+        trailing_metadata  = grpc.aio.Metadata(),
+        details            = details,
+        debug_error_string = "",
+    )
+
+
+class TestRemSvcTriggerRetry:
+
+    @pytest.mark.asyncio
+    async def test_unavailable_is_retried(self):
+        """UNAVAILABLE should be retried; trigger must not yield FAILED on first attempt."""
+        t = _make_trigger()
+        success_payload = {EVT_STATE: JobState.SUCCESS.value, EVT_RESULTS: {1: {"rc": 0}}}
+        # Fail once with UNAVAILABLE, then succeed.
+        calls = [_rpc_error(grpc.StatusCode.UNAVAILABLE, "transient"), success_payload]
+
+        async def _run_stream_side_effect():
+            item = calls.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            if isinstance(item, grpc.aio.AioRpcError):
+                raise item
+            return item
+
+        with patch.object(t, "_run_stream", side_effect=_run_stream_side_effect), \
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+            events = await _collect(t)
+
+        assert len(events) == 1
+        assert events[0].payload[EVT_STATE] == JobState.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_resource_exhausted_is_retried(self):
+        """RESOURCE_EXHAUSTED is also in _RETRYABLE_CODES and must be retried."""
+        t = _make_trigger()
+        success_payload = {EVT_STATE: JobState.SUCCESS.value, EVT_RESULTS: {1: {"rc": 0}}}
+        errors = [_rpc_error(grpc.StatusCode.RESOURCE_EXHAUSTED)] * 2
+
+        call_iter = iter(errors + [success_payload])
+
+        async def _side_effect():
+            item = next(call_iter)
+            if isinstance(item, grpc.aio.AioRpcError):
+                raise item
+            return item
+
+        with patch.object(t, "_run_stream", side_effect=_side_effect), \
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+            events = await _collect(t)
+
+        assert events[0].payload[EVT_STATE] == JobState.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_deadline_exceeded_not_retried(self):
+        """DEADLINE_EXCEEDED is not in _RETRYABLE_CODES — fail immediately."""
+        t = _make_trigger()
+        with patch.object(
+            t, "_run_stream",
+            new=AsyncMock(side_effect=_rpc_error(grpc.StatusCode.DEADLINE_EXCEEDED, "too slow")),
+        ):
+            events = await _collect(t)
+
+        assert events[0].payload[EVT_STATE] == JobState.FAILED.value
+        assert "DEADLINE_EXCEEDED" in events[0].payload[EVT_ERROR]
+
+    @pytest.mark.asyncio
+    async def test_all_retries_exhausted_yields_failed(self):
+        """After _MAX_ATTEMPTS failures with UNAVAILABLE, exactly one FAILED event."""
+        from remsvc_provider.triggers.remsvc import _MAX_ATTEMPTS
+        t = _make_trigger()
+
+        with patch.object(
+            t, "_run_stream",
+            new=AsyncMock(side_effect=_rpc_error(grpc.StatusCode.UNAVAILABLE, "gone")),
+        ), patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+            events = await _collect(t)
+
+        assert len(events) == 1
+        assert events[0].payload[EVT_STATE] == JobState.FAILED.value
+        assert "All" in events[0].payload[EVT_ERROR]
+        assert str(_MAX_ATTEMPTS) in events[0].payload[EVT_ERROR]
+
+    @pytest.mark.asyncio
+    async def test_retry_count_matches_max_attempts(self):
+        """_run_stream must be called exactly _MAX_ATTEMPTS times on persistent UNAVAILABLE."""
+        from remsvc_provider.triggers.remsvc import _MAX_ATTEMPTS
+        t = _make_trigger()
+        mock_stream = AsyncMock(
+            side_effect=_rpc_error(grpc.StatusCode.UNAVAILABLE, "gone")
+        )
+
+        with patch.object(t, "_run_stream", mock_stream), \
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+            await _collect(t)
+
+        assert mock_stream.call_count == _MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_fails_on_first_attempt(self):
+        """PERMISSION_DENIED is not retryable — _run_stream called exactly once."""
+        t = _make_trigger()
+        mock_stream = AsyncMock(
+            side_effect=_rpc_error(grpc.StatusCode.PERMISSION_DENIED, "denied")
+        )
+
+        with patch.object(t, "_run_stream", mock_stream):
+            events = await _collect(t)
+
+        assert mock_stream.call_count == 1
+        assert events[0].payload[EVT_STATE] == JobState.FAILED.value
+
+
+# ---------------------------------------------------------------------------
+# RemSvcTrigger — _PROTO_AVAILABLE guard
+# ---------------------------------------------------------------------------
+
+class TestRemSvcTriggerProtoGuard:
+
+    @pytest.mark.asyncio
+    async def test_run_yields_failed_when_stubs_missing(self):
+        t = _make_trigger()
+        with patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", False):
+            events = await _collect(t)
+        assert len(events) == 1
+        assert events[0].payload[EVT_STATE] == JobState.FAILED.value
+        assert "regen_proto" in events[0].payload[EVT_ERROR]
+
+
+# ---------------------------------------------------------------------------
+# RemSvcTrigger — duplicate tid warning
+# ---------------------------------------------------------------------------
+
+class TestRemSvcTriggerDuplicateTid:
+
+    @pytest.mark.asyncio
+    async def test_duplicate_tid_logs_warning(self, caplog):
+        import logging
+        t = _make_trigger(commands=[_CMD1])
+        stream  = _AsyncStream([
+            _mock_response(tid=1, rc=0, out="first"),
+            _mock_response(tid=1, rc=0, out="second"),   # duplicate
+        ])
+        stub    = MagicMock()
+        stub.RemCmdStrm.return_value = stream
+        channel = MagicMock()
+        channel.__aenter__ = AsyncMock(return_value=channel)
+        channel.__aexit__  = AsyncMock(return_value=False)
+
+        with patch.object(t, "_async_channel", return_value=channel), \
+             patch.object(t, "_async_stub",    return_value=stub), \
+             caplog.at_level(logging.WARNING, logger="remsvc_provider.triggers.remsvc"):
+            await t._run_stream()
+
+        assert any("Duplicate" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_tid_last_response_wins(self):
+        t = _make_trigger(commands=[_CMD1])
+        stream  = _AsyncStream([
+            _mock_response(tid=1, rc=0, out="first"),
+            _mock_response(tid=1, rc=0, out="second"),
+        ])
+        stub    = MagicMock()
+        stub.RemCmdStrm.return_value = stream
+        channel = MagicMock()
+        channel.__aenter__ = AsyncMock(return_value=channel)
+        channel.__aexit__  = AsyncMock(return_value=False)
+
+        with patch.object(t, "_async_channel", return_value=channel), \
+             patch.object(t, "_async_stub",    return_value=stub):
+            result = await t._run_stream()
+
+        assert result[EVT_RESULTS][1]["out"] == "second"
+
+
+# ---------------------------------------------------------------------------
+# RemSvcTrigger — _call_metadata() merge and deduplication
+# ---------------------------------------------------------------------------
+
+class TestCallMetadata:
+    """Unit tests for _call_metadata() without touching the Airflow DB.
+    All tests patch _hook() so no RemSvcHook is actually constructed."""
+
+    def _hook_returning(self, conn_meta: list) -> MagicMock:
+        mock_hook = MagicMock()
+        mock_hook.get_call_metadata.return_value = conn_meta
+        return mock_hook
+
+    def test_no_conn_meta_returns_operator_metadata(self):
+        t = _make_trigger(metadata=[("x-custom", "val")])
+        with patch.object(t, "_hook", return_value=self._hook_returning([])):
+            result = t._call_metadata()
+        assert result == [("x-custom", "val")]
+
+    def test_no_conn_meta_no_operator_meta_returns_empty(self):
+        t = _make_trigger()
+        with patch.object(t, "_hook", return_value=self._hook_returning([])):
+            result = t._call_metadata()
+        assert result == []
+
+    def test_conn_meta_returned_when_operator_meta_empty(self):
+        t = _make_trigger()
+        conn_meta = [("authorization", "Bearer conn-tok")]
+        with patch.object(t, "_hook", return_value=self._hook_returning(conn_meta)):
+            result = t._call_metadata()
+        assert result == [("authorization", "Bearer conn-tok")]
+
+    def test_conn_meta_and_operator_non_auth_meta_merged(self):
+        t = _make_trigger(metadata=[("x-custom", "val")])
+        conn_meta = [("authorization", "Bearer conn-tok")]
+        with patch.object(t, "_hook", return_value=self._hook_returning(conn_meta)):
+            result = t._call_metadata()
+        assert ("authorization", "Bearer conn-tok") in result
+        assert ("x-custom", "val") in result
+
+    def test_operator_authorization_stripped_when_conn_meta_present(self):
+        """Operator-supplied 'authorization' must be dropped when conn provides one."""
+        t = _make_trigger(metadata=[("authorization", "Bearer op-tok"), ("x-other", "val")])
+        conn_meta = [("authorization", "Bearer conn-tok")]
+        with patch.object(t, "_hook", return_value=self._hook_returning(conn_meta)):
+            result = t._call_metadata()
+        auth_values = [v for k, v in result if k == "authorization"]
+        assert auth_values == ["Bearer conn-tok"], "only conn token must survive"
+        assert ("x-other", "val") in result
+
+    def test_operator_authorization_kept_when_no_conn_meta(self):
+        """Without conn-level auth, operator metadata is passed through unchanged."""
+        t = _make_trigger(metadata=[("authorization", "Bearer op-tok")])
+        with patch.object(t, "_hook", return_value=self._hook_returning([])):
+            result = t._call_metadata()
+        assert result == [("authorization", "Bearer op-tok")]
+
+    def test_authorization_key_comparison_is_case_insensitive(self):
+        """Operator headers with 'Authorization' (mixed case) are also stripped."""
+        t = _make_trigger(metadata=[("Authorization", "Bearer op-tok")])
+        conn_meta = [("authorization", "Bearer conn-tok")]
+        with patch.object(t, "_hook", return_value=self._hook_returning(conn_meta)):
+            result = t._call_metadata()
+        auth_values = [v for k, v in result if k.lower() == "authorization"]
+        assert len(auth_values) == 1
+        assert auth_values[0] == "Bearer conn-tok"
+
+
+# ---------------------------------------------------------------------------
+# RemSvcTrigger — metadata forwarded to RemCmdStrm
+# ---------------------------------------------------------------------------
+
+class TestRemSvcTriggerMetadata:
+
+    @pytest.mark.asyncio
+    async def test_metadata_passed_to_stream(self):
+        """_run_stream must forward _call_metadata() to RemCmdStrm."""
+        meta = [("x-token", "secret")]
+        t    = _make_trigger(commands=[_CMD1], metadata=meta)
+        stream  = _AsyncStream([_mock_response(tid=1, rc=0)])
+        stub    = MagicMock()
+        stub.RemCmdStrm.return_value = stream
+        channel = MagicMock()
+
+        # _call_metadata() calls _hook() which hits the Airflow DB; patch it
+        # directly to return our known metadata list.
+        with patch.object(t, "_async_channel", return_value=channel), \
+             patch.object(t, "_async_stub",    return_value=stub), \
+             patch.object(t, "_call_metadata", return_value=meta):
+            await t._run_stream()
+
+        stub.RemCmdStrm.assert_called_once_with(
+            timeout  = t.stream_timeout,
+            metadata = meta,
+        )
+
+
+# ---------------------------------------------------------------------------
+# crc32hex utility
+# ---------------------------------------------------------------------------
+
+class TestCrc32Hex:
+
+    def test_known_value(self):
+        from remsvc_provider.operators.remsvc import crc32hex
+        # echo -n "hello" | crc32 → 3610a686
+        assert crc32hex("hello") == "3610a686"
+
+    def test_empty_string(self):
+        from remsvc_provider.operators.remsvc import crc32hex
+        # crc32 of empty string is 0
+        assert crc32hex("") == "00000000"
+
+    def test_returns_eight_hex_chars(self):
+        from remsvc_provider.operators.remsvc import crc32hex
+        result = crc32hex("any string")
+        assert len(result) == 8
+        assert all(c in "0123456789abcdef" for c in result)
+
+
+# ---------------------------------------------------------------------------
+# get_provider_info() contract
+# ---------------------------------------------------------------------------
+
+class TestGetProviderInfo:
+
+    def test_required_keys_present(self):
+        from remsvc_provider import get_provider_info
+        info = get_provider_info()
+        assert info["package-name"] == "airflow-provider-remsvc"
+        assert info["min-airflow-version"] == "3.1.0"
+        assert "1.0.0" in info["versions"]
+        assert info["name"] == "RemSvc"
+
+    def test_returns_dict(self):
+        from remsvc_provider import get_provider_info
+        assert isinstance(get_provider_info(), dict)
+
+
+# ---------------------------------------------------------------------------
+# RemSvcResult.to_dict() schema
+# ---------------------------------------------------------------------------
+
+class TestRemSvcResult:
+
+    def test_to_dict_keys(self):
+        from remsvc_provider.operators.remsvc import RemSvcResult
+        r = RemSvcResult(state="SUCCESS", results=[{"tid": 1}], error_msg=None)
+        d = r.to_dict()
+        assert set(d.keys()) == {"state", "results", "error_msg"}
+
+    def test_to_dict_values(self):
+        from remsvc_provider.operators.remsvc import RemSvcResult
+        payload = [{"tid": 1, "rc": 0}]
+        r = RemSvcResult(state="SUCCESS", results=payload, error_msg=None)
+        d = r.to_dict()
+        assert d["state"]     == "SUCCESS"
+        assert d["results"]   == payload
+        assert d["error_msg"] is None
+
+    def test_to_dict_with_error(self):
+        from remsvc_provider.operators.remsvc import RemSvcResult
+        r = RemSvcResult(state="FAILED", results=[], error_msg="oops")
+        assert r.to_dict()["error_msg"] == "oops"

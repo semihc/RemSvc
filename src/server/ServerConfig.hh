@@ -2,6 +2,7 @@
 #ifndef SERVER_CONFIG_HH
 #define SERVER_CONFIG_HH
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,15 @@
 //   1=^echo\b
 //   2=^dir\b
 //
+//   [auth]
+//   ; Bearer-token authentication (Model B: one token per caller identity).
+//   ; Key = identity label (logged on each authenticated call).
+//   ; Value = secret bearer token (clients send as "Authorization: Bearer <value>").
+//   ; An empty section disables authentication — all callers are permitted.
+//   airflow-prod    = secret-prod-token
+//   airflow-staging = secret-staging-token
+//   dev-semih       = secret-dev-token
+//
 //   [log]
 //   file=RemSvc_server.log
 //   level=info                   ; trace|debug|info|warn|error
@@ -38,6 +48,11 @@ struct ServerConfig {
     // Network
     int port{50051};
 
+    // Per-command process timeout in milliseconds.
+    // Each child process is forcibly killed if it has not exited within this
+    // window.  Must be ≤ stream_timeout to be meaningful.  Default: 30 s.
+    int cmdTimeoutMs{30000};
+
     // TLS
     bool        tlsEnabled{false};
     std::string certFile;
@@ -46,6 +61,11 @@ struct ServerConfig {
 
     // Authorization — regex patterns; empty list = allow all commands.
     std::vector<std::string> allowlist;
+
+    // Authentication — identity → bearer-token map.
+    // Empty map = authentication disabled (all callers permitted).
+    // Populated from the [auth] section; passed to BearerTokenAuthProcessor.
+    std::map<std::string, std::string> authTokens;
 
     // Logging (fed into RS::CliLogFile / RS::CliLogLevel / RS::CliDbgLevel
     // before InitLogging(); file sink rotates: 10 files x 10 MB each)

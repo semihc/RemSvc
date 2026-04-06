@@ -32,7 +32,7 @@ Repo layout context
 
 Requirements
 ------------
-  pip install apache-airflow>=3.1.0 grpcio grpcio-status
+  pip install apache-airflow>=3.1.0 grpcio
 """
 
 from __future__ import annotations
@@ -44,6 +44,22 @@ from typing import Any
 
 import grpc
 import grpc.aio
+
+# ---------------------------------------------------------------------------
+# Retry policy for transient gRPC errors (UNAVAILABLE / network blips).
+# The trigger will attempt the stream up to _MAX_ATTEMPTS times before
+# giving up.  Back-off delay: _BACKOFF_BASE_S * 2^(attempt-1), capped at
+# _BACKOFF_MAX_S.  Example with base=1s / max=16s: 1 s → 2 s → 4 s.
+# ---------------------------------------------------------------------------
+_MAX_ATTEMPTS    = 3
+_BACKOFF_BASE_S  = 1.0
+_BACKOFF_MAX_S   = 16.0
+
+# gRPC status codes considered transient; others fail immediately.
+_RETRYABLE_CODES = frozenset({
+    grpc.StatusCode.UNAVAILABLE,
+    grpc.StatusCode.RESOURCE_EXHAUSTED,
+})
 
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 
@@ -106,6 +122,9 @@ class RemSvcTrigger(BaseTrigger):
         self.grpc_conn_id   = grpc_conn_id
         self.stream_timeout = stream_timeout
         self.metadata       = list(metadata or [])
+        # Cached hook instance — created once per trigger execution so that
+        # _async_channel() and _call_metadata() share a single Airflow DB lookup.
+        self._hook_cache: Any = None
 
     # ------------------------------------------------------------------
     # BaseTrigger contract
@@ -125,7 +144,13 @@ class RemSvcTrigger(BaseTrigger):
         )
 
     async def run(self) -> AsyncIterator[TriggerEvent]:
-        """Async generator: yield exactly one TriggerEvent when done."""
+        """Async generator: yield exactly one TriggerEvent when done.
+
+        Transient gRPC errors (``UNAVAILABLE``, ``RESOURCE_EXHAUSTED``) are
+        retried up to ``_MAX_ATTEMPTS`` times with exponential back-off.
+        ``DEADLINE_EXCEEDED`` and other permanent errors are not retried.
+        ``asyncio.TimeoutError`` (``stream_timeout`` exceeded) is never retried.
+        """
         if not _PROTO_AVAILABLE:
             yield TriggerEvent({
                 EVT_STATE:   JobState.FAILED.value,
@@ -142,41 +167,87 @@ class RemSvcTrigger(BaseTrigger):
             "RemSvcTrigger started: %d command(s)  timeout=%.0fs",
             len(self.commands), self.stream_timeout,
         )
-        try:
-            event = await asyncio.wait_for(
-                self._run_stream(),
-                timeout=self.stream_timeout,
-            )
-            yield TriggerEvent(event)
 
-        except asyncio.TimeoutError:
-            log.warning(
-                "RemSvcTrigger timed out after %.0fs", self.stream_timeout,
-            )
-            yield TriggerEvent({
-                EVT_STATE:   JobState.CANCELLED.value,
-                EVT_RESULTS: {},
-                EVT_ERROR:   f"Stream timed out after {self.stream_timeout}s",
-            })
+        last_exc: grpc.aio.AioRpcError | None = None
 
-        except grpc.aio.AioRpcError as exc:
-            log.error(
-                "RemSvcTrigger gRPC error: code=%s details=%s",
-                exc.code(), exc.details(),
-            )
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                event = await asyncio.wait_for(
+                    self._run_stream(),
+                    timeout=self.stream_timeout,
+                )
+                yield TriggerEvent(event)
+                return  # success — done
+
+            except asyncio.TimeoutError:
+                # Timeout is not retried — the entire stream budget is exhausted.
+                log.warning(
+                    "RemSvcTrigger timed out after %.0fs (attempt %d/%d)",
+                    self.stream_timeout, attempt, _MAX_ATTEMPTS,
+                )
+                yield TriggerEvent({
+                    EVT_STATE:   JobState.CANCELLED.value,
+                    EVT_RESULTS: {},
+                    EVT_ERROR:   f"Stream timed out after {self.stream_timeout}s",
+                })
+                return
+
+            except grpc.aio.AioRpcError as exc:
+                if exc.code() in _RETRYABLE_CODES and attempt < _MAX_ATTEMPTS:
+                    delay = min(_BACKOFF_BASE_S * (2 ** (attempt - 1)), _BACKOFF_MAX_S)
+                    log.warning(
+                        "RemSvcTrigger transient gRPC error (attempt %d/%d): "
+                        "code=%s details=%s — retrying in %.1fs",
+                        attempt, _MAX_ATTEMPTS, exc.code(), exc.details(), delay,
+                    )
+                    last_exc = exc
+                    await asyncio.sleep(delay)
+                    continue
+
+                # Non-retryable gRPC error, or final attempt exhausted.
+                log.error(
+                    "RemSvcTrigger gRPC error (attempt %d/%d): code=%s details=%s",
+                    attempt, _MAX_ATTEMPTS, exc.code(), exc.details(),
+                )
+                yield TriggerEvent({
+                    EVT_STATE:   JobState.FAILED.value,
+                    EVT_RESULTS: {},
+                    EVT_ERROR:   f"gRPC error {exc.code()}: {exc.details()}",
+                })
+                return
+
+            except Exception as exc:  # noqa: BLE001
+                log.exception("RemSvcTrigger unexpected error (attempt %d/%d)",
+                              attempt, _MAX_ATTEMPTS)
+                yield TriggerEvent({
+                    EVT_STATE:   JobState.FAILED.value,
+                    EVT_RESULTS: {},
+                    EVT_ERROR:   repr(exc),
+                })
+                return
+
+        # All retry attempts exhausted with a retryable error on the last one.
+        if last_exc is None:
+            # Should not happen: the loop only reaches here after a retryable
+            # AioRpcError set last_exc and continued.  Guard defensively.
             yield TriggerEvent({
                 EVT_STATE:   JobState.FAILED.value,
                 EVT_RESULTS: {},
-                EVT_ERROR:   f"gRPC error {exc.code()}: {exc.details()}",
+                EVT_ERROR:   f"All {_MAX_ATTEMPTS} attempts failed (unknown error).",
             })
-
-        except Exception as exc:  # noqa: BLE001
-            log.exception("RemSvcTrigger unexpected error")
-            yield TriggerEvent({
-                EVT_STATE:   JobState.FAILED.value,
-                EVT_RESULTS: {},
-                EVT_ERROR:   repr(exc),
-            })
+            return
+        log.error(
+            "RemSvcTrigger: all %d attempts failed.  Last error: code=%s details=%s",
+            _MAX_ATTEMPTS, last_exc.code(), last_exc.details(),
+        )
+        yield TriggerEvent({
+            EVT_STATE:   JobState.FAILED.value,
+            EVT_RESULTS: {},
+            EVT_ERROR:   (
+                f"All {_MAX_ATTEMPTS} attempts failed.  "
+                f"Last: gRPC {last_exc.code()}: {last_exc.details()}"
+            ),
+        })
 
     # ------------------------------------------------------------------
     # Stream execution
@@ -185,64 +256,66 @@ class RemSvcTrigger(BaseTrigger):
     async def _run_stream(self) -> dict[str, Any]:
         """Open RemCmdStrm, concurrently write all commands and read all
         responses, then return a completed event payload dict."""
-        async with self._async_channel() as channel:
-            stub   = self._async_stub(channel)
-            stream = stub.RemCmdStrm(
-                timeout  = self.stream_timeout,
-                metadata = self.metadata,
-            )
+        # get_async_channel() returns a pooled channel shared with other
+        # concurrent triggers — do NOT close it here.
+        channel  = self._async_channel()
+        stub     = self._async_stub(channel)
+        stream   = stub.RemCmdStrm(
+            timeout  = self.stream_timeout,
+            metadata = self._call_metadata(),
+        )
 
-            # Assign tid = 1-based index; keep a local copy for the closure.
-            indexed: list[tuple[int, dict[str, Any]]] = [
-                (i + 1, cmd) for i, cmd in enumerate(self.commands)
-            ]
-            results: dict[int, dict[str, Any]] = {}
+        # Assign tid = 1-based index; keep a local copy for the closures.
+        indexed: list[tuple[int, dict[str, Any]]] = [
+            (i + 1, cmd) for i, cmd in enumerate(self.commands)
+        ]
+        results: dict[int, dict[str, Any]] = {}
 
-            async def _write() -> None:
-                for tid, cmd_dict in indexed:
-                    cmd_str = cmd_dict.get("cmd", "")
-                    msg = pb2.RemCmdMsg(                         # type: ignore[attr-defined]
-                        cmd    = cmd_str,
-                        cmdtyp = cmd_dict.get("cmdtyp", 0),
-                        cmdusr = cmd_dict.get("cmdusr", ""),
-                        src    = cmd_dict.get("src", ""),
-                        tid    = tid,
-                        hsh    = crc32hex(cmd_str),
+        async def _write() -> None:
+            for tid, cmd_dict in indexed:
+                cmd_str = cmd_dict.get("cmd", "")
+                msg = pb2.RemCmdMsg(                         # type: ignore[attr-defined]
+                    cmd    = cmd_str,
+                    cmdtyp = cmd_dict.get("cmdtyp", 0),
+                    cmdusr = cmd_dict.get("cmdusr", ""),
+                    src    = cmd_dict.get("src", ""),
+                    tid    = tid,
+                    hsh    = crc32hex(cmd_str),
+                )
+                await stream.write(msg)
+                log.debug("Sent    tid=%d  cmd=%r", tid, cmd_str)
+            await stream.done_writing()
+            log.debug("Writer finished (%d command(s) sent).", len(indexed))
+
+        async def _read() -> None:
+            async for response in stream:
+                tid = response.tid
+                if tid in results:
+                    log.warning(
+                        "Duplicate response for tid=%d — overwriting previous entry",
+                        tid,
                     )
-                    await stream.write(msg)
-                    log.debug("Sent    tid=%d  cmd=%r", tid, cmd_str)
-                await stream.done_writing()
-                log.debug("Writer finished (%d command(s) sent).", len(indexed))
+                # Look up the original command string for reference.
+                cmd_str = (
+                    indexed[tid - 1][1].get("cmd", "")
+                    if 0 < tid <= len(indexed) else ""
+                )
+                results[tid] = {
+                    "tid": tid,
+                    "rc":  response.rc,
+                    "out": response.out,
+                    "err": response.err,
+                    "hsh": response.hsh,
+                    "cmd": cmd_str,
+                }
+                log.debug("Received tid=%d  rc=%d", tid, response.rc)
+            log.debug("Reader finished (%d response(s) received).", len(results))
 
-            async def _read() -> None:
-                async for response in stream:
-                    tid = response.tid
-                    if tid in results:
-                        log.warning(
-                            "Duplicate response for tid=%d — overwriting previous entry",
-                            tid,
-                        )
-                    # Look up the original command string for reference.
-                    cmd_str = (
-                        indexed[tid - 1][1].get("cmd", "")
-                        if 0 < tid <= len(indexed) else ""
-                    )
-                    results[tid] = {
-                        "tid": tid,
-                        "rc":  response.rc,
-                        "out": response.out,
-                        "err": response.err,
-                        "hsh": response.hsh,
-                        "cmd": cmd_str,
-                    }
-                    log.debug("Received tid=%d  rc=%d", tid, response.rc)
-                log.debug("Reader finished (%d response(s) received).", len(results))
-
-            # gather() uses return_exceptions=False (default): if _write() raises
-            # (e.g. server closes the stream mid-write) it cancels _read() and
-            # re-raises, discarding any partial results already in `results`.
-            # The outer exception handlers in run() will catch this and yield FAILED.
-            await asyncio.gather(_write(), _read())
+        # gather() uses return_exceptions=False (default): if _write() raises
+        # (e.g. server closes the stream mid-write) it cancels _read() and
+        # re-raises, discarding any partial results already in `results`.
+        # The outer exception handlers in run() will catch this and yield FAILED.
+        await asyncio.gather(_write(), _read())
 
         # ---- post-stream analysis ----------------------------------------
 
@@ -275,10 +348,39 @@ class RemSvcTrigger(BaseTrigger):
     # gRPC async helpers
     # ------------------------------------------------------------------
 
+    def _hook(self):
+        """Return the cached RemSvcHook, creating it on first call.
+
+        Both ``_async_channel()`` and ``_call_metadata()`` call this method, so
+        the Airflow connection is looked up exactly once per trigger run rather
+        than once per method call.
+        """
+        if self._hook_cache is None:
+            from remsvc_provider.hooks.remsvc import RemSvcHook
+            self._hook_cache = RemSvcHook(self.grpc_conn_id)
+        return self._hook_cache
+
     def _async_channel(self) -> grpc.aio.Channel:
-        """Build an async gRPC channel via RemSvcHook (respects TLS config)."""
-        from remsvc_provider.hooks.remsvc import RemSvcHook
-        return RemSvcHook(self.grpc_conn_id).get_async_channel()
+        """Return a pooled async gRPC channel via RemSvcHook."""
+        return self._hook().get_async_channel()
+
+    def _call_metadata(self) -> list[tuple[str, str]]:
+        """Merge connection-level metadata (auth token) with operator metadata.
+
+        Connection metadata (bearer token from Airflow connection extra) takes
+        precedence over duplicate keys in the operator-supplied metadata list,
+        so that auth is always injected even if the operator omits it.
+        """
+        conn_meta = self._hook().get_call_metadata()
+        if not conn_meta:
+            return list(self.metadata)
+        # Deduplicate: drop any "authorization" entries from operator metadata
+        # to avoid sending two conflicting Authorization headers.
+        op_meta = [
+            (k, v) for k, v in self.metadata
+            if k.lower() != "authorization"
+        ]
+        return conn_meta + op_meta
 
     def _async_stub(self, channel: grpc.aio.Channel) -> Any:
         return pb2_grpc.RemSvcStub(channel)  # type: ignore[attr-defined]

@@ -114,6 +114,21 @@ class TestCaCert:
         with pytest.raises(AirflowException, match="remsvc_test"):
             hook._ca_cert()
 
+    def test_cert_bytes_cached_after_first_read(self, tmp_path):
+        """Second call must not re-open the file."""
+        ca_file = tmp_path / "ca.pem"
+        ca_file.write_bytes(b"CERT_DATA")
+        hook = _make_hook(_make_conn(extra_dejson={"ca_cert_path": str(ca_file)}))
+        first  = hook._ca_cert()
+        ca_file.unlink()           # delete the file — a second read would raise
+        second = hook._ca_cert()   # must return cached value, not raise
+        assert first == second == b"CERT_DATA"
+
+    def test_none_cached_when_no_path_configured(self):
+        hook = _make_hook(_make_conn())
+        assert hook._ca_cert() is None
+        assert hook._ca_cert() is None  # second call also returns None (cached)
+
 
 # ---------------------------------------------------------------------------
 # get_channel() — sync, insecure vs TLS
@@ -201,3 +216,64 @@ class TestHookMetadata:
 
     def test_hook_name(self):
         assert RemSvcHook.hook_name == "RemSvc gRPC"
+
+
+# ---------------------------------------------------------------------------
+# get_conn() — Airflow connection lookup failure
+# ---------------------------------------------------------------------------
+
+class TestGetConn:
+
+    def test_raises_when_connection_not_found(self):
+        """get_connection() raises AirflowNotFoundException for unknown conn_id.
+        Verify the error propagates without being swallowed by the hook."""
+        from airflow.exceptions import AirflowNotFoundException
+        hook = RemSvcHook(remsvc_conn_id="nonexistent_conn")
+        with patch.object(
+            RemSvcHook,
+            "get_connection",
+            side_effect=AirflowNotFoundException("nonexistent_conn"),
+        ):
+            with pytest.raises(AirflowNotFoundException):
+                hook.get_conn()
+
+    def test_conn_is_cached_after_first_call(self):
+        hook = RemSvcHook(remsvc_conn_id="remsvc_test")
+        conn = _make_conn()
+        with patch.object(RemSvcHook, "get_connection", return_value=conn) as mock_get:
+            hook.get_conn()
+            hook.get_conn()
+        mock_get.assert_called_once()  # second call uses cached _conn
+
+
+# ---------------------------------------------------------------------------
+# get_call_metadata() — bearer token injection
+# ---------------------------------------------------------------------------
+
+class TestGetCallMetadata:
+
+    def test_returns_bearer_header_when_token_configured(self):
+        hook = _make_hook(_make_conn(extra_dejson={"bearer_token": "my-secret"}))
+        assert hook.get_call_metadata() == [("authorization", "Bearer my-secret")]
+
+    def test_returns_empty_list_when_no_token(self):
+        hook = _make_hook(_make_conn())
+        assert hook.get_call_metadata() == []
+
+    def test_returns_empty_list_when_token_is_empty_string(self):
+        hook = _make_hook(_make_conn(extra_dejson={"bearer_token": ""}))
+        assert hook.get_call_metadata() == []
+
+    def test_header_key_is_lowercase_authorization(self):
+        hook = _make_hook(_make_conn(extra_dejson={"bearer_token": "tok123"}))
+        key, _ = hook.get_call_metadata()[0]
+        assert key == "authorization"
+
+    def test_header_value_has_bearer_prefix(self):
+        hook = _make_hook(_make_conn(extra_dejson={"bearer_token": "tok123"}))
+        _, value = hook.get_call_metadata()[0]
+        assert value == "Bearer tok123"
+
+    def test_returns_exactly_one_entry(self):
+        hook = _make_hook(_make_conn(extra_dejson={"bearer_token": "tok"}))
+        assert len(hook.get_call_metadata()) == 1

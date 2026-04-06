@@ -29,7 +29,7 @@ Repo layout context
 Requirements
 ------------
   Apache Airflow >= 3.1  (Python 3.10+)
-  grpcio, grpcio-status
+  grpcio >= 1.67.0
 """
 
 from __future__ import annotations
@@ -109,6 +109,10 @@ class RemSvcOperator(BaseOperator):
     stream_timeout:
         Maximum seconds for the entire stream, enforced at both the Python
         asyncio level and as the gRPC deadline on the stream (default 3600 s).
+        If the gRPC channel drops mid-stream (e.g. a network blip), the trigger
+        raises ``AioRpcError(UNAVAILABLE)`` and the task fails immediately —
+        there is no automatic reconnect.  For resilience, set ``retries`` on
+        the operator or wrap in an Airflow retry policy.
     result_handler:
         Optional callable applied to the raw ``{tid: result_dict}`` mapping
         before it is stored in XCom.  Defaults to a sorted list by tid.
@@ -163,6 +167,13 @@ class RemSvcOperator(BaseOperator):
             )
         if not self.commands:
             raise AirflowException("RemSvcOperator: 'commands' must not be empty.")
+
+        empty_idxs = [i for i, c in enumerate(self.commands) if not c.get("cmd", "").strip()]
+        if empty_idxs:
+            raise AirflowException(
+                f"RemSvcOperator: 'cmd' is empty or whitespace-only at "
+                f"index(es) {empty_idxs} in 'commands'."
+            )
 
         # Deferred import to avoid circular dependency at module load time
         from remsvc_provider.triggers.remsvc import RemSvcTrigger

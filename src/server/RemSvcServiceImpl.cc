@@ -18,11 +18,12 @@ namespace RS {
 
 namespace {
 
-// Truncate s to kMaxOutputBytes and append a notice if it was longer.
+// Truncate s to kMaxOutputBytes and append the sentinel marker if it was longer.
+// The marker uses SOH (\x01) delimiters — see kTruncationMarker in the header.
 void truncateOutput(std::string& s) {
     if (s.size() > kMaxOutputBytes) {
         s.resize(kMaxOutputBytes);
-        s += "\n[output truncated]";
+        s.append(kTruncationMarker.data(), kTruncationMarker.size());
     }
 }
 
@@ -32,7 +33,7 @@ void truncateOutput(std::string& s) {
 // ── Default CmdRunner ─────────────────────────────────────────────────────────
 
 int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
-                 std::string& out, std::string& err)
+                 std::string& out, std::string& err, int timeoutMs)
 {
     QProcess prg;
     QString qcmd = QString::fromUtf8(cmd.data(), static_cast<qsizetype>(cmd.size()));
@@ -92,17 +93,42 @@ int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
         return 1;
     }
 
-    static constexpr int kWaitPeriodMs = 30000;
-    if (!prg.waitForFinished(kWaitPeriodMs)) {
+    // Drain stdout and stderr incrementally while the process runs.
+    //
+    // Calling waitForFinished() alone can deadlock when the child writes more
+    // output than the OS pipe buffer (~64 KB on Linux): the child blocks trying
+    // to write to a full pipe while the parent blocks waiting for the child to
+    // exit.  Draining both channels in a polling loop avoids this.
+    //
+    // A short poll interval (50 ms) keeps CPU negligible while ensuring the
+    // pipe never fills up between drains, even at full 256 KB output.
+    QByteArray outAll, errAll;
+    QDeadlineTimer deadline(timeoutMs);
+
+    while (!deadline.hasExpired()) {
+        // Wake on data-ready or 50 ms, whichever comes first.
+        prg.waitForReadyRead(50);
+        outAll += prg.readAllStandardOutput();
+        errAll += prg.readAllStandardError();
+        if (prg.state() == QProcess::NotRunning)
+            break;
+    }
+
+    if (prg.state() != QProcess::NotRunning) {
         prg.kill();
+        prg.waitForFinished(1000);   // brief wait for kill to take effect
         err = "process timed out";
-        Log(RS::error, "runInProcess: process timed out after {}ms cmd={}", kWaitPeriodMs, cmd);
+        Log(RS::error, "runInProcess: process timed out after {}ms cmd={}", timeoutMs, cmd);
         return 1;
     }
 
-    QByteArray errStr = prg.readAllStandardError();
-    QByteArray outStr = prg.readAllStandardOutput();
+    // Final drain — bytes buffered after the last waitForReadyRead.
+    outAll += prg.readAllStandardOutput();
+    errAll += prg.readAllStandardError();
+
     int rv = prg.exitCode();
+    QByteArray outStr = std::move(outAll);
+    QByteArray errStr = std::move(errAll);
 
     out = outStr.constData();
     Log(RS::debug, "runInProcess out={}", outStr.constData());
@@ -121,16 +147,45 @@ RemSvcServiceImpl::RemSvcServiceImpl(CmdRunner runner, std::vector<std::string> 
     : m_runner(std::move(runner))
     , m_startTime(std::chrono::steady_clock::now())
 {
-    // Compile each pattern string into a std::regex at construction time so
-    // that bad patterns fail early (throws std::regex_error).
+    // Compile each pattern string into a std::regex at construction time.
+    //
+    // If any pattern is syntactically invalid (std::regex_error), the entire
+    // allowlist is disabled and m_denyAll is set to true.  This is fail-safe
+    // behaviour: a misconfigured pattern must not silently create an open hole
+    // that permits every command through.  The server will still start; every
+    // command will be denied with PERMISSION_DENIED until the config is fixed
+    // and the server restarted.
     m_allowlist.reserve(allowlist.size());
-    for (const auto& pat : allowlist)
-        m_allowlist.emplace_back(pat);
+    for (const auto& pat : allowlist) {
+        try {
+            m_allowlist.emplace_back(pat,
+                std::regex_constants::ECMAScript |
+                std::regex_constants::optimize);
+        } catch (const std::regex_error& e) {
+            Log(RS::error,
+                "RemSvcServiceImpl: invalid allowlist regex '{}': {} — "
+                "ALL commands will be denied until the config is corrected.",
+                pat, e.what());
+            m_denyAll = true;
+            m_allowlist.clear();   // no partial list; deny-all is the sole guard
+            break;
+        }
+    }
+    if (!allowlist.empty() && m_denyAll) {
+        Log(RS::warn,
+            "RemSvcServiceImpl: allowlist compilation failed; "
+            "deny-all mode is active ({} pattern(s) discarded).",
+            allowlist.size());
+    }
 }
 
 
 std::string RemSvcServiceImpl::checkAllowed(std::string_view cmd) const {
-    if (m_allowlist.empty()) return {};   // empty allowlist = permit all
+    // Deny-all mode: triggered when any allowlist pattern failed to compile.
+    if (m_denyAll)
+        return "all commands denied: allowlist configuration is invalid (check server logs)";
+    // Empty, valid allowlist = no restriction configured; permit all.
+    if (m_allowlist.empty()) return {};
     std::string s(cmd);
     for (const auto& rx : m_allowlist)
         if (std::regex_search(s, rx)) return {};

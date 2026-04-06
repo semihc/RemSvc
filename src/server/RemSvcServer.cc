@@ -66,6 +66,12 @@ int main(int argc, char *argv[]) {
     cli_app.add_option("--key",      keyFile,   "Server private key PEM file (required with --tls)");
     cli_app.add_option("--ca-cert",  caFile,    "CA certificate PEM file (enables mutual TLS)");
 
+    // Per-command child-process timeout
+    int cmdTimeoutMs = cfg.cmdTimeoutMs;
+    cli_app.add_option("--cmd-timeout-ms", cmdTimeoutMs,
+                       "Per-command child-process kill timeout in milliseconds "
+                       "(default: 30000)");
+
     // Authorization: regex patterns (CLI list replaces config list when supplied)
     std::vector<std::string> allowlist = cfg.allowlist;
     cli_app.add_option("--allow", allowlist,
@@ -117,7 +123,7 @@ int main(int argc, char *argv[]) {
     std::optional<TlsConfig> tlsConfig;
     if (tls) tlsConfig = TlsConfig{certFile, keyFile, caFile};
 
-    GrpcServerThread grpcThread{port, tlsConfig, allowlist};
+    GrpcServerThread grpcThread{port, tlsConfig, allowlist, cfg.authTokens, cfg.cmdTimeoutMs};
     Log(info, "Starting gRPC Server at port {}", port);
     grpcThread.start();
 
