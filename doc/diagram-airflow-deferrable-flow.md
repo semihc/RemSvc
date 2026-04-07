@@ -30,14 +30,16 @@ sequenceDiagram
     S  ->> T  : hand trigger to triggerer event loop
     T  ->> DB : deserialise RemSvcTrigger via serialize() / constructor
 
-    loop Up to _MAX_ATTEMPTS retries (UNAVAILABLE / RESOURCE_EXHAUSTED)
+    loop Up to _MAX_ATTEMPTS retries (UNAVAILABLE / RESOURCE_EXHAUSTED, only if sent_ref==0)
+        T  ->> T  : sent_ref = [0]  ← mutable write counter for this attempt
         T  ->> T  : _hook() → RemSvcHook (Airflow DB lookup, cached)
         T  ->> T  : _async_channel() → pooled grpc.aio.Channel
         T  ->> T  : _call_metadata() → merge conn auth + operator metadata
         T  ->> G  : open RemCmdStrm(timeout, metadata)
 
         par asyncio.gather
-            T  ->> G  : write RemCmdMsg(tid=1, cmd, hsh) … RemCmdMsg(tid=N)
+            T  ->> G  : write RemCmdMsg(tid=1, cmd, hsh) → sent_ref[0]++
+            T  ->> G  : write RemCmdMsg(tid=N, cmd, hsh) → sent_ref[0]++
             T  ->> G  : done_writing()
         and
             G -->> T  : RemResMsg(tid=?, rc, out, err) [any order]
@@ -49,8 +51,10 @@ sequenceDiagram
 
         alt success
             T  ->> DB : yield TriggerEvent(state=SUCCESS, results={tid:…})
-        else transient gRPC error
+        else transient gRPC error AND sent_ref[0] == 0
             T  ->> T  : sleep(backoff) then retry
+        else transient gRPC error AND sent_ref[0] > 0
+            T  ->> DB : yield TriggerEvent(state=FAILED, error="…not retried to prevent duplicate execution")
         else timeout / permanent error
             T  ->> DB : yield TriggerEvent(state=CANCELLED|FAILED, error)
         end
@@ -74,8 +78,13 @@ sequenceDiagram
   triggerer with zero worker slots consumed.
 - **Retry policy:** `UNAVAILABLE` and `RESOURCE_EXHAUSTED` are retried up to
   `_MAX_ATTEMPTS` (3) times with exponential backoff (1 s → 2 s → 4 s, capped
-  at 16 s).  `DEADLINE_EXCEEDED`, `asyncio.TimeoutError`, and all other errors
-  fail immediately without retry.
+  at 16 s), **but only when no writes have been dispatched in that attempt**
+  (`sent_ref[0] == 0`).  If the connection drops after one or more commands have
+  already been written, the trigger fails immediately with `FAILED` rather than
+  retrying — retrying would resend all commands from the top, causing duplicate
+  execution of non-idempotent commands on the remote host.
+  `DEADLINE_EXCEEDED`, `asyncio.TimeoutError`, and all other errors fail
+  immediately without retry regardless of how many commands were sent.
 - **Channel pool:** `_async_channel()` returns a module-level pooled
   `grpc.aio.Channel` shared across all concurrent triggers targeting the same
   host/TLS configuration.  The channel is never closed by the trigger.

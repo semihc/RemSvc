@@ -87,8 +87,13 @@ int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
 #endif
 
     prg.start();
-    if (prg.state() == QProcess::NotRunning &&
-        prg.error() == QProcess::FailedToStart) {
+    // waitForStarted() blocks until Qt transitions the process out of the
+    // Starting state (Running) or reports FailedToStart.  The immediate
+    // state()/error() check that previously appeared here was racy on Windows:
+    // QProcess::start() is asynchronous and the state can still be NotRunning
+    // for a brief window after the call returns, causing valid commands to be
+    // reported as FailedToStart.
+    if (!prg.waitForStarted()) {
         err = "process failed to start";
         Log(RS::error, "runInProcess: failed to start process for cmd={}", cmd);
         return 1;

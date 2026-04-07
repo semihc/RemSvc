@@ -212,7 +212,7 @@ class TestRemSvcTriggerRunStream:
         ch, stub, _ = self._setup(t, [_mock_response(tid=1, rc=0, out="hello")])
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            result = await t._run_stream()
+            result = await t._run_stream([0])
 
         assert result[EVT_STATE]          == JobState.SUCCESS.value
         assert result[EVT_RESULTS][1]["rc"]  == 0
@@ -229,7 +229,7 @@ class TestRemSvcTriggerRunStream:
         ch, stub, _ = self._setup(t, responses)
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            result = await t._run_stream()
+            result = await t._run_stream([0])
 
         assert result[EVT_STATE] == JobState.SUCCESS.value
         assert len(result[EVT_RESULTS]) == 3
@@ -248,7 +248,7 @@ class TestRemSvcTriggerRunStream:
         ch, stub, _ = self._setup(t, responses)
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            result = await t._run_stream()
+            result = await t._run_stream([0])
 
         assert result[EVT_STATE]             == JobState.SUCCESS.value
         assert result[EVT_RESULTS][1]["out"] == "hello"
@@ -265,7 +265,7 @@ class TestRemSvcTriggerRunStream:
         ch, stub, _ = self._setup(t, responses)
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            result = await t._run_stream()
+            result = await t._run_stream([0])
 
         assert result[EVT_STATE]   == JobState.FAILED.value
         assert "2" in result[EVT_ERROR]          # failed tid mentioned
@@ -279,7 +279,7 @@ class TestRemSvcTriggerRunStream:
         ch, stub, _ = self._setup(t, [_mock_response(tid=1, rc=0)])
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            result = await t._run_stream()
+            result = await t._run_stream([0])
 
         assert result[EVT_STATE] == JobState.FAILED.value
         assert "2" in result[EVT_ERROR]          # missing tid=2 reported
@@ -294,7 +294,7 @@ class TestRemSvcTriggerRunStream:
         ch, stub, stream = self._setup(t, responses)
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            await t._run_stream()
+            await t._run_stream([0])
 
         # write() called once per command
         assert stream.write.call_count == 2
@@ -303,12 +303,28 @@ class TestRemSvcTriggerRunStream:
         assert sent_msgs[1].tid == 2
 
     @pytest.mark.asyncio
+    async def test_sent_ref_counts_written_commands(self):
+        """sent_ref[0] must equal the number of commands actually written."""
+        t = _make_trigger(commands=[_CMD1, _CMD2, _CMD3])
+        responses = [
+            _mock_response(tid=1, rc=0),
+            _mock_response(tid=2, rc=0),
+            _mock_response(tid=3, rc=0),
+        ]
+        ch, stub, _ = self._setup(t, responses)
+        sent_ref: list[int] = [0]
+        with patch.object(t, "_async_channel", return_value=ch), \
+             patch.object(t, "_async_stub",    return_value=stub):
+            await t._run_stream(sent_ref)
+        assert sent_ref[0] == 3
+
+    @pytest.mark.asyncio
     async def test_done_writing_called(self):
         t = _make_trigger(commands=[_CMD1])
         ch, stub, stream = self._setup(t, [_mock_response(tid=1, rc=0)])
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            await t._run_stream()
+            await t._run_stream([0])
         stream.done_writing.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -317,7 +333,7 @@ class TestRemSvcTriggerRunStream:
         ch, stub, _ = self._setup(t, [_mock_response(tid=1, rc=0)])
         with patch.object(t, "_async_channel", return_value=ch), \
              patch.object(t, "_async_stub",    return_value=stub):
-            result = await t._run_stream()
+            result = await t._run_stream([0])
         assert result[EVT_RESULTS][1]["cmd"] == "echo hello"
 
 
@@ -504,13 +520,11 @@ class TestRemSvcTriggerRetry:
         """UNAVAILABLE should be retried; trigger must not yield FAILED on first attempt."""
         t = _make_trigger()
         success_payload = {EVT_STATE: JobState.SUCCESS.value, EVT_RESULTS: {1: {"rc": 0}}}
-        # Fail once with UNAVAILABLE, then succeed.
+        # Fail once with UNAVAILABLE (sent_ref stays 0 — no writes), then succeed.
         calls = [_rpc_error(grpc.StatusCode.UNAVAILABLE, "transient"), success_payload]
 
-        async def _run_stream_side_effect():
+        async def _run_stream_side_effect(sent_ref):
             item = calls.pop(0)
-            if isinstance(item, Exception):
-                raise item
             if isinstance(item, grpc.aio.AioRpcError):
                 raise item
             return item
@@ -531,7 +545,7 @@ class TestRemSvcTriggerRetry:
 
         call_iter = iter(errors + [success_payload])
 
-        async def _side_effect():
+        async def _side_effect(sent_ref):
             item = next(call_iter)
             if isinstance(item, grpc.aio.AioRpcError):
                 raise item
@@ -602,6 +616,49 @@ class TestRemSvcTriggerRetry:
         assert mock_stream.call_count == 1
         assert events[0].payload[EVT_STATE] == JobState.FAILED.value
 
+    @pytest.mark.asyncio
+    async def test_unavailable_after_writes_not_retried(self):
+        """UNAVAILABLE after ≥1 write must fail immediately — no retry to prevent
+        duplicate command execution on the remote server."""
+        t = _make_trigger(commands=[_CMD1, _CMD2])
+
+        async def _side_effect(sent_ref):
+            # Simulate one command already dispatched before the transport drops.
+            sent_ref[0] = 1
+            raise _rpc_error(grpc.StatusCode.UNAVAILABLE, "connection reset")
+
+        mock_stream = AsyncMock(side_effect=_side_effect)
+
+        with patch.object(t, "_run_stream", mock_stream), \
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+            events = await _collect(t)
+
+        # Must fail on the first attempt; no retry.
+        assert mock_stream.call_count == 1
+        assert events[0].payload[EVT_STATE] == JobState.FAILED.value
+        assert "duplicate" in events[0].payload[EVT_ERROR].lower()
+
+    @pytest.mark.asyncio
+    async def test_unavailable_before_any_writes_is_retried(self):
+        """UNAVAILABLE when sent_ref[0] == 0 (connection failed before any write)
+        must still retry — no commands reached the server so no duplicate risk."""
+        t = _make_trigger(commands=[_CMD1])
+        success_payload = {EVT_STATE: JobState.SUCCESS.value, EVT_RESULTS: {1: {"rc": 0}}}
+        calls = [_rpc_error(grpc.StatusCode.UNAVAILABLE, "not yet up"), success_payload]
+
+        async def _side_effect(sent_ref):
+            # sent_ref[0] stays 0 — nothing was written before the failure.
+            item = calls.pop(0)
+            if isinstance(item, grpc.aio.AioRpcError):
+                raise item
+            return item
+
+        with patch.object(t, "_run_stream", side_effect=_side_effect), \
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+            events = await _collect(t)
+
+        assert events[0].payload[EVT_STATE] == JobState.SUCCESS.value
+
 
 # ---------------------------------------------------------------------------
 # RemSvcTrigger — _PROTO_AVAILABLE guard
@@ -642,7 +699,7 @@ class TestRemSvcTriggerDuplicateTid:
         with patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub), \
              caplog.at_level(logging.WARNING, logger="remsvc_provider.triggers.remsvc"):
-            await t._run_stream()
+            await t._run_stream([0])
 
         assert any("Duplicate" in r.message for r in caplog.records)
 
@@ -661,7 +718,7 @@ class TestRemSvcTriggerDuplicateTid:
 
         with patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub):
-            result = await t._run_stream()
+            result = await t._run_stream([0])
 
         assert result[EVT_RESULTS][1]["out"] == "second"
 
@@ -755,7 +812,7 @@ class TestRemSvcTriggerMetadata:
         with patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub), \
              patch.object(t, "_call_metadata", return_value=meta):
-            await t._run_stream()
+            await t._run_stream([0])
 
         stub.RemCmdStrm.assert_called_once_with(
             timeout  = t.stream_timeout,

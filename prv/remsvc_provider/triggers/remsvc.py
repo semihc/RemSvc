@@ -171,9 +171,15 @@ class RemSvcTrigger(BaseTrigger):
         last_exc: grpc.aio.AioRpcError | None = None
 
         for attempt in range(1, _MAX_ATTEMPTS + 1):
+            # sent_ref[0] is incremented by _write() after each stream.write()
+            # call succeeds.  We read it in the except blocks below to decide
+            # whether a retry is safe: once any command has been dispatched to
+            # the server, retrying the whole stream would re-execute those
+            # commands and cause duplicate side effects for non-idempotent ops.
+            sent_ref: list[int] = [0]
             try:
                 event = await asyncio.wait_for(
-                    self._run_stream(),
+                    self._run_stream(sent_ref),
                     timeout=self.stream_timeout,
                 )
                 yield TriggerEvent(event)
@@ -194,10 +200,32 @@ class RemSvcTrigger(BaseTrigger):
 
             except grpc.aio.AioRpcError as exc:
                 if exc.code() in _RETRYABLE_CODES and attempt < _MAX_ATTEMPTS:
+                    if sent_ref[0] > 0:
+                        # At least one command reached the server.  Retrying
+                        # would resend all commands from the top, re-executing
+                        # work that may already have completed.  Fail fast.
+                        log.error(
+                            "RemSvcTrigger transient gRPC error after %d command(s) "
+                            "sent — not retrying to prevent duplicate execution "
+                            "(attempt %d/%d): code=%s details=%s",
+                            sent_ref[0], attempt, _MAX_ATTEMPTS,
+                            exc.code(), exc.details(),
+                        )
+                        yield TriggerEvent({
+                            EVT_STATE:   JobState.FAILED.value,
+                            EVT_RESULTS: {},
+                            EVT_ERROR:   (
+                                f"gRPC error {exc.code()} after {sent_ref[0]} "
+                                "command(s) sent — not retried to prevent "
+                                "duplicate execution"
+                            ),
+                        })
+                        return
+
                     delay = min(_BACKOFF_BASE_S * (2 ** (attempt - 1)), _BACKOFF_MAX_S)
                     log.warning(
-                        "RemSvcTrigger transient gRPC error (attempt %d/%d): "
-                        "code=%s details=%s — retrying in %.1fs",
+                        "RemSvcTrigger transient gRPC error before any writes "
+                        "(attempt %d/%d): code=%s details=%s — retrying in %.1fs",
                         attempt, _MAX_ATTEMPTS, exc.code(), exc.details(), delay,
                     )
                     last_exc = exc
@@ -253,9 +281,14 @@ class RemSvcTrigger(BaseTrigger):
     # Stream execution
     # ------------------------------------------------------------------
 
-    async def _run_stream(self) -> dict[str, Any]:
+    async def _run_stream(self, sent_ref: list[int]) -> dict[str, Any]:
         """Open RemCmdStrm, concurrently write all commands and read all
-        responses, then return a completed event payload dict."""
+        responses, then return a completed event payload dict.
+
+        ``sent_ref`` is a single-element list used as a mutable counter: the
+        caller reads ``sent_ref[0]`` after an exception to decide whether a
+        retry is safe (zero means no writes reached the server).
+        """
         # get_async_channel() returns a pooled channel shared with other
         # concurrent triggers — do NOT close it here.
         channel  = self._async_channel()
@@ -283,6 +316,7 @@ class RemSvcTrigger(BaseTrigger):
                     hsh    = crc32hex(cmd_str),
                 )
                 await stream.write(msg)
+                sent_ref[0] += 1
                 log.debug("Sent    tid=%d  cmd=%r", tid, cmd_str)
             await stream.done_writing()
             log.debug("Writer finished (%d command(s) sent).", len(indexed))
