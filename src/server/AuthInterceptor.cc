@@ -100,7 +100,9 @@ grpc::Status BearerTokenAuthProcessor::Process(
 
     // Mark the Authorization header as consumed (gRPC strips it from metadata
     // visible to service handlers, keeping the raw token off the handler layer).
-    consumed_auth_metadata->insert({it->first, it->second});
+    consumed_auth_metadata->insert(
+        std::make_pair(std::string(it->first.data(),  it->first.size()),
+                       std::string(it->second.data(), it->second.size())));
 
     Log(RS::info, "AuthProcessor: authenticated identity='{}'", *identity);
     return grpc::Status::OK;

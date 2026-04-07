@@ -20,6 +20,11 @@ namespace {
 std::string readFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("cannot open file: " + path);
+    f.seekg(0, std::ios::end);
+    auto size = f.tellg();
+    if (size > 1 * 1024 * 1024)  // 1 MB limit — PEM certs are never this large
+        throw std::runtime_error("file too large (> 1 MB): " + path);
+    f.seekg(0, std::ios::beg);
     std::ostringstream ss;
     ss << f.rdbuf();
     return ss.str();
@@ -31,6 +36,7 @@ std::string readFile(const std::string& path) {
 GrpcServerThread::GrpcServerThread(int port,
                                    std::optional<TlsConfig>          tls,
                                    std::vector<std::string>           allowlist,
+                                   std::vector<std::string>           denylist,
                                    std::map<std::string, std::string> authTokens,
                                    int                                cmdTimeoutMs)
     : m_port(port)
@@ -63,11 +69,21 @@ GrpcServerThread::GrpcServerThread(int port,
     }
 
     // Attach the bearer-token auth processor to the credentials.
-    // AuthMetadataProcessor::Process() is called before any service handler,
-    // for every RPC, regardless of TLS mode.
+    // SetAuthMetadataProcessor() is only supported by TLS (SSL) credentials;
+    // calling it on InsecureServerCredentials triggers "Not Supported" in the
+    // gRPC core.  Attach the processor only when TLS is active.  When running
+    // insecure (dev/test), auth-token enforcement is unavailable and a warning
+    // is emitted if tokens were configured.
     auto authProc = std::make_shared<RS::BearerTokenAuthProcessor>(
         std::move(authTokens));
-    creds->SetAuthMetadataProcessor(authProc);
+    if (tls) {
+        creds->SetAuthMetadataProcessor(authProc);
+    } else if (authProc->IsEnabled()) {
+        Log(RS::warn,
+            "GrpcServerThread: bearer-token auth is configured but TLS is "
+            "disabled — SetAuthMetadataProcessor is not supported on insecure "
+            "credentials; authentication will NOT be enforced.");
+    }
 
     builder.AddListeningPort(server_address, creds);
 
@@ -79,7 +95,8 @@ GrpcServerThread::GrpcServerThread(int port,
                                      std::string& out, std::string& err) {
         return RS::runInProcess(cmd, cmdtyp, cmdusr, out, err, timeout);
     };
-    m_service = make_unique<RS::RemSvcServiceImpl>(std::move(runner), std::move(allowlist));
+    m_service = make_unique<RS::RemSvcServiceImpl>(std::move(runner), std::move(allowlist),
+                                                   cmdTimeoutMs, std::move(denylist));
     builder.RegisterService(m_service.get());
 
     m_server = std::move(builder.BuildAndStart());
@@ -104,7 +121,7 @@ void GrpcServerThread::stop()
     // that a command already running at shutdown time has a fair chance to
     // complete even if a new command started just before the signal arrived.
     auto deadline = std::chrono::system_clock::now() +
-                    std::chrono::milliseconds(m_cmdTimeoutMs * 2);
+                    std::chrono::milliseconds(static_cast<int64_t>(m_cmdTimeoutMs) * 2);
     m_server->Shutdown(deadline);
     wait();
 }

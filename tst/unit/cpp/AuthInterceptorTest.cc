@@ -4,19 +4,80 @@
  * Unit tests for BearerTokenAuthProcessor.
  *
  * The processor is a pure in-process object; no gRPC server is started.
- * We use grpc::CreateTestAuthContext() (grpcpp/test/server_context_test_spouse.h)
- * to obtain a writable AuthContext in tests.
+ * grpc::AuthContext is a pure abstract class, so we provide a minimal
+ * concrete fake (FakeAuthContext) instead of using the test-spouse helper
+ * that is not available in the vcpkg gRPC distribution.
  */
 
 #include <gtest/gtest.h>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <grpcpp/grpcpp.h>
+#include <grpcpp/security/auth_context.h>
 #include <grpcpp/security/auth_metadata_processor.h>
-#include <grpcpp/test/server_context_test_spouse.h>
 
 #include "AuthInterceptor.hh"
+
+
+// ---------------------------------------------------------------------------
+// Minimal concrete AuthContext fake
+// ---------------------------------------------------------------------------
+
+// grpc::AuthPropertyIterator's default constructor is protected.
+// This thin subclass exposes it so FakeAuthContext::begin()/end() can
+// return a default-constructed (sentinel) iterator without pulling in
+// the full SecureAuthContext machinery.
+struct NullAuthPropertyIterator : grpc::AuthPropertyIterator {
+    NullAuthPropertyIterator() : grpc::AuthPropertyIterator() {}
+};
+
+class FakeAuthContext : public grpc::AuthContext {
+public:
+    bool IsPeerAuthenticated() const override {
+        return !peer_identity_property_.empty() &&
+               properties_.count(peer_identity_property_) > 0;
+    }
+
+    std::vector<grpc::string_ref> GetPeerIdentity() const override {
+        return FindPropertyValues(peer_identity_property_);
+    }
+
+    std::string GetPeerIdentityPropertyName() const override {
+        return peer_identity_property_;
+    }
+
+    std::vector<grpc::string_ref> FindPropertyValues(
+            const std::string& name) const override {
+        std::vector<grpc::string_ref> result;
+        auto range = properties_.equal_range(name);
+        for (auto it = range.first; it != range.second; ++it)
+            result.emplace_back(it->second);
+        return result;
+    }
+
+    grpc::AuthPropertyIterator begin() const override {
+        return NullAuthPropertyIterator{};
+    }
+    grpc::AuthPropertyIterator end() const override {
+        return NullAuthPropertyIterator{};
+    }
+
+    void AddProperty(const std::string& key,
+                     const grpc::string_ref& value) override {
+        properties_.emplace(key, std::string(value.data(), value.size()));
+    }
+
+    bool SetPeerIdentityPropertyName(const std::string& name) override {
+        peer_identity_property_ = name;
+        return true;
+    }
+
+private:
+    std::multimap<std::string, std::string> properties_;
+    std::string peer_identity_property_;
+};
 
 
 // ---------------------------------------------------------------------------
@@ -27,24 +88,24 @@ using InputMetadata  = grpc::AuthMetadataProcessor::InputMetadata;
 using OutputMetadata = grpc::AuthMetadataProcessor::OutputMetadata;
 
 // Build a single-entry InputMetadata map.
-static InputMetadata makeMetadata(const std::string& key, const std::string& value)
+// Parameters are grpc::string_ref so that callers can pass string literals
+// (static storage duration) — avoids dangling refs from std::string temporaries.
+static InputMetadata makeMetadata(grpc::string_ref key, grpc::string_ref value)
 {
     InputMetadata m;
-    m.insert({grpc::string_ref(key.data(), key.size()),
-              grpc::string_ref(value.data(), value.size())});
+    m.insert({key, value});
     return m;
 }
 
-// Run Process() through a real ServerContext's auth context.
+// Run Process() through a FakeAuthContext.
 // Returns the gRPC status; consumed/response metadata are discarded.
 static grpc::Status runProcess(
     RS::BearerTokenAuthProcessor& proc,
     const InputMetadata&          meta)
 {
-    grpc::ServerContext           sctx;
-    grpc::ServerContextTestSpouse spouse(&sctx);
-    OutputMetadata consumed, response;
-    return proc.Process(meta, sctx.auth_context().get(), &consumed, &response);
+    FakeAuthContext  ctx;
+    OutputMetadata   consumed, response;
+    return proc.Process(meta, &ctx, &consumed, &response);
 }
 
 // Run Process() and also return the consumed metadata for inspection.
@@ -53,11 +114,9 @@ static grpc::Status runProcessWithConsumed(
     const InputMetadata&          meta,
     OutputMetadata&               consumed_out)
 {
-    grpc::ServerContext           sctx;
-    grpc::ServerContextTestSpouse spouse(&sctx);
-    OutputMetadata response;
-    auto status = proc.Process(meta, sctx.auth_context().get(), &consumed_out, &response);
-    return status;
+    FakeAuthContext ctx;
+    OutputMetadata  response;
+    return proc.Process(meta, &ctx, &consumed_out, &response);
 }
 
 // Run Process() and return the identity property stamped on the AuthContext.
@@ -65,11 +124,10 @@ static std::string runProcessGetIdentity(
     RS::BearerTokenAuthProcessor& proc,
     const InputMetadata&          meta)
 {
-    grpc::ServerContext           sctx;
-    grpc::ServerContextTestSpouse spouse(&sctx);
-    OutputMetadata consumed, response;
-    proc.Process(meta, sctx.auth_context().get(), &consumed, &response);
-    auto vals = sctx.auth_context()->FindPropertyValues("x-remsvc-identity");
+    FakeAuthContext ctx;
+    OutputMetadata  consumed, response;
+    proc.Process(meta, &ctx, &consumed, &response);
+    auto vals = ctx.FindPropertyValues("x-remsvc-identity");
     if (vals.empty()) return "";
     return std::string(vals[0].data(), vals[0].size());
 }

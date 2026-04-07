@@ -403,34 +403,6 @@ TEST(RemSvcServiceImpl, AllowlistBadRegexActivatesDenyAll)
     EXPECT_EQ(res.out(), "");   // runner must NOT have been called
 }
 
-TEST(RemSvcServiceImpl, AllowlistBadRegexBlocksStreamToo)
-{
-    // Same deny-all must apply to processStream, not just RemCmd.
-    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"["}); // invalid
-    FakeCmdStream stream;
-    stream.requests = { makeReq("echo hi") };
-
-    auto status = svc.processStream(stream);
-
-    EXPECT_FALSE(status.ok());
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
-    EXPECT_TRUE(stream.responses.empty());
-}
-
-TEST(RemSvcServiceImpl, AllowlistMixedValidAndBadPatternDeniesAll)
-{
-    // Even if the first pattern is valid, a later bad pattern triggers deny-all.
-    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b", "[bad"});
-    RS::RemCmdMsg req;  req.set_cmd("echo hello");
-    RS::RemResMsg res;
-    grpc::ServerContext ctx;
-
-    auto status = svc.RemCmd(&ctx, &req, &res);
-
-    EXPECT_FALSE(status.ok());
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
-}
-
 // ---------------------------------------------------------------------------
 // Output truncation (256 KB limit)
 // ---------------------------------------------------------------------------
@@ -483,7 +455,9 @@ TEST(RemSvcServiceImpl, OutputBelowLimitNotTruncated)
 TEST(RemSvcServiceImpl, TruncationMarkerContainsSentinelBytes)
 {
     // Verify the marker itself has the SOH bytes that make it unambiguous.
-    EXPECT_EQ(RS::kTruncationMarker.front(), '\x01');
+    // The marker starts and ends with '\n' for output formatting; the \x01
+    // SOH sentinel bytes are inside the string.
+    EXPECT_EQ(RS::kTruncationMarker.front(), '\n');
     EXPECT_EQ(RS::kTruncationMarker.back(),  '\n');
     EXPECT_NE(RS::kTruncationMarker.find('\x01'), std::string_view::npos);
 }
@@ -586,6 +560,34 @@ static RS::RemCmdMsg makeReq(std::string cmd, int tid = 0, std::string hsh = "")
 // ---------------------------------------------------------------------------
 // RemCmdStrm — processStream tests
 // ---------------------------------------------------------------------------
+
+TEST(RemSvcServiceImpl, AllowlistBadRegexBlocksStreamToo)
+{
+    // Same deny-all must apply to processStream, not just RemCmd.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"["}); // invalid
+    FakeCmdStream stream;
+    stream.requests = { makeReq("echo hi") };
+
+    auto status = svc.processStream(stream);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_TRUE(stream.responses.empty());
+}
+
+TEST(RemSvcServiceImpl, AllowlistMixedValidAndBadPatternDeniesAll)
+{
+    // Even if the first pattern is valid, a later bad pattern triggers deny-all.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b", "[bad"});
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+}
 
 TEST(RemSvcServiceImpl, AllowlistBlocksInStream)
 {
@@ -764,6 +766,86 @@ TEST(RemSvcServiceImpl, RemCmdStrmEmptyCmdusrForwarded)
     svc.processStream(stream);
 
     EXPECT_EQ(capturedUser, "");
+}
+
+
+// ---------------------------------------------------------------------------
+// Denylist
+// ---------------------------------------------------------------------------
+
+TEST(RemSvcServiceImpl, DenylistBlocksMatchingCommand)
+{
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {}, 30000, {"rm\\b"});
+    RS::RemCmdMsg req;  req.set_cmd("rm -rf /");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_EQ(res.out(), "");
+}
+
+TEST(RemSvcServiceImpl, DenylistPermitsNonMatchingCommand)
+{
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {}, 30000, {"rm\\b"});
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    EXPECT_TRUE(svc.RemCmd(&ctx, &req, &res).ok());
+}
+
+TEST(RemSvcServiceImpl, DenylistTakesPrecedenceOverAllowlist)
+{
+    // echo is in the allowlist but also matches the denylist — deny wins.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b"}, 30000, {"^echo\\b"});
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+}
+
+TEST(RemSvcServiceImpl, BothListsCommandMustPassBoth)
+{
+    // Only "echo" allowed; "rm" denied. A command that is allowed but not denied executes.
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {"^echo\\b"}, 30000, {"rm\\b"});
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    EXPECT_TRUE(svc.RemCmd(&ctx, &req, &res).ok());
+}
+
+TEST(RemSvcServiceImpl, DenylistBadRegexActivatesDenyAll)
+{
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {}, 30000, {"["});
+    RS::RemCmdMsg req;  req.set_cmd("echo hello");
+    RS::RemResMsg res;
+    grpc::ServerContext ctx;
+
+    auto status = svc.RemCmd(&ctx, &req, &res);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+}
+
+TEST(RemSvcServiceImpl, DenylistBlocksInStream)
+{
+    RS::RemSvcServiceImpl svc(makeFakeRunner("ok", "", 0), {}, 30000, {"rm\\b"});
+    FakeCmdStream stream;
+    stream.requests = { makeReq("rm -rf /") };
+
+    auto status = svc.processStream(stream);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_TRUE(stream.responses.empty());
 }
 
 

@@ -21,7 +21,7 @@ graph TB
         direction TB
         SRV["RemSvc_server\n(gRPC server)\nport 50051"]
         PROC["Child processes\n(cmd.exe /C  or  /bin/sh -c\nor  powershell.exe / pwsh)\none per command"]
-        INI["server.ini\n[server] [tls] [auth]\n[allowlist] [log]"]
+        INI["server.ini\n[server] [tls] [auth]\n[denylist] [allowlist] [log]"]
 
         SRV -->|"QProcess::start()\nstdout/stderr pipes"| PROC
         INI -.->|"loaded at startup"| SRV
@@ -57,18 +57,21 @@ graph LR
 
     subgraph server_side ["Server side"]
         AUTH["BearerTokenAuthProcessor\n(runs before every RPC)\nconstant-time comparison"]
-        ALLOW["Command allowlist\n(std::regex)\ndeny-all on bad regex"]
+        DENY["Command denylist\n(std::regex)\nchecked first — deny wins"]
+        ALLOW["Command allowlist\n(std::regex)\nchecked second"]
         EXEC["runInProcess()\ncmdTimeoutMs kill deadline"]
     end
 
     AMETA -->|"Authorization: Bearer token\n(encrypted if TLS enabled)"| CH
     CH    -->|"gRPC metadata header"| AUTH
-    AUTH  -->|"identity stamped on AuthContext\nx-remsvc-identity"| ALLOW
-    ALLOW -->|"pattern match passes"| EXEC
+    AUTH  -->|"identity stamped on AuthContext\nx-remsvc-identity"| DENY
+    DENY  -->|"no deny pattern matched"| ALLOW
+    ALLOW -->|"allow pattern matched\n(or allowlist empty)"| EXEC
 
     AUTH  --x|"UNAUTHENTICATED\n(token mismatch or absent)"| X1[ ]
-    ALLOW --x|"PERMISSION_DENIED\n(no pattern matches)"| X2[ ]
-    EXEC  --x|"killed + rc≠0\n(timeout exceeded)"| X3[ ]
+    DENY  --x|"PERMISSION_DENIED\n(deny pattern matched)"| X2[ ]
+    ALLOW --x|"PERMISSION_DENIED\n(no allow pattern matches)"| X3[ ]
+    EXEC  --x|"killed + rc≠0\n(timeout exceeded)"| X4[ ]
 
     style untrusted    fill:#fff0f0,stroke:#cc4444,stroke-width:1px,stroke-dasharray:4
     style airflow_side fill:#e8f4f8,stroke:#4a90d9,stroke-width:2px

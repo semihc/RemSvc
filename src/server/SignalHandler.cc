@@ -27,7 +27,8 @@ int SignalHandler::signalFd[2] = {-1, -1};
 
 // ── Windows: global pointer so the console handler can reach the instance ─────
 #ifdef Q_OS_WIN
-static SignalHandler *g_signalHandler = nullptr;
+#include <atomic>
+static std::atomic<SignalHandler*> g_signalHandler{nullptr};
 #endif
 
 

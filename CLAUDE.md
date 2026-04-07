@@ -68,6 +68,8 @@ Four RPC methods:
 ### C++ Server (`src/server/`)
 - `RemSvcServiceImpl` implements the gRPC service; runs in a `QThread` (`GrpcServerThread`)
 - Command execution uses `QProcess`: Windows routes through `cmd.exe /C`, Linux through `/bin/sh -c`
+- Command filtering: denylist is checked first (any match → `PERMISSION_DENIED`), then allowlist (must match at least one pattern, or allowlist is empty). A bad regex in either list activates deny-all mode at startup.
+- `BearerTokenAuthProcessor` enforces bearer-token auth; requires TLS — server refuses to start if `[auth]` tokens are configured without TLS enabled.
 - `RestServer.cc` is a separate Qt HTTP server wrapping the gRPC interface
 - Signal handling (`SignalHandler.cc`) supports graceful shutdown on both Unix and Windows
 

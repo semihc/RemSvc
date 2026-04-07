@@ -29,6 +29,7 @@ struct TlsConfig {
 //
 // tls:          if present, enables TLS using the supplied cert/key files.
 // allowlist:    forwarded to RemSvcServiceImpl — see its header for semantics.
+// denylist:     forwarded to RemSvcServiceImpl — deny patterns take precedence over allowlist.
 // authTokens:   identity→token map forwarded to BearerTokenAuthProcessor.
 //               Empty map = authentication disabled.
 // cmdTimeoutMs: per-command child-process timeout in milliseconds (default 30 s).
@@ -38,6 +39,7 @@ public:
     explicit GrpcServerThread(int port,
                               std::optional<TlsConfig>          tls          = std::nullopt,
                               std::vector<std::string>           allowlist    = {},
+                              std::vector<std::string>           denylist     = {},
                               std::map<std::string, std::string> authTokens   = {},
                               int                                cmdTimeoutMs = 30000);
 

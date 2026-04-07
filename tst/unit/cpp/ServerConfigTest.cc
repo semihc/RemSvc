@@ -208,7 +208,9 @@ TEST(ServerConfig, AuthTokenBracedEnvVarExpanded)
 
 TEST(ServerConfig, ParsesAllowlistPatterns)
 {
-    TempFile ini("[allowlist]\n1=^echo\\b\n2=^dir\\b\n");
+    // QSettings IniFormat processes '\b' as backspace; use '\\b' on disk
+    // (written as "\\\\b" in C++) so it is read back as literal backslash-b.
+    TempFile ini("[allowlist]\n1=^echo\\\\b\n2=^dir\\\\b\n");
     ServerConfig cfg;
     EXPECT_TRUE(loadServerConfig(ini.str(), cfg).empty());
     ASSERT_EQ(cfg.allowlist.size(), 2u);
@@ -222,6 +224,48 @@ TEST(ServerConfig, EmptyAllowlistSectionLeavesListEmpty)
     ServerConfig cfg;
     EXPECT_TRUE(loadServerConfig(ini.str(), cfg).empty());
     EXPECT_TRUE(cfg.allowlist.empty());
+}
+
+
+// ---------------------------------------------------------------------------
+// [denylist] section
+// ---------------------------------------------------------------------------
+
+TEST(ServerConfig, ParsesDenylistPatterns)
+{
+    TempFile ini("[denylist]\n1=^rm\\\\b\n2=^del\\\\b\n");
+    ServerConfig cfg;
+    EXPECT_TRUE(loadServerConfig(ini.str(), cfg).empty());
+    ASSERT_EQ(cfg.denylist.size(), 2u);
+    EXPECT_EQ(cfg.denylist[0], "^rm\\b");
+    EXPECT_EQ(cfg.denylist[1], "^del\\b");
+}
+
+TEST(ServerConfig, EmptyDenylistSectionLeavesListEmpty)
+{
+    TempFile ini("[denylist]\n");
+    ServerConfig cfg;
+    EXPECT_TRUE(loadServerConfig(ini.str(), cfg).empty());
+    EXPECT_TRUE(cfg.denylist.empty());
+}
+
+
+// ---------------------------------------------------------------------------
+// [server] section — validation
+// ---------------------------------------------------------------------------
+
+TEST(ServerConfig, InvalidPortReturnsError)
+{
+    TempFile ini("[server]\nport=99999\n");
+    ServerConfig cfg;
+    EXPECT_FALSE(loadServerConfig(ini.str(), cfg).empty());
+}
+
+TEST(ServerConfig, ZeroCmdTimeoutReturnsError)
+{
+    TempFile ini("[server]\ncmd_timeout_ms=0\n");
+    ServerConfig cfg;
+    EXPECT_FALSE(loadServerConfig(ini.str(), cfg).empty());
 }
 
 

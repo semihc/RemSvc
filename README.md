@@ -126,13 +126,25 @@ ca=                           ; empty = server-side TLS only; set for mutual TLS
 ; Bearer-token authentication.  Key = identity label (logged on each auth).
 ; Value = secret bearer token.  Empty section = auth disabled.
 ; Token values support $VAR expansion to avoid plaintext secrets in the file.
+; NOTE: [auth] requires TLS — the server refuses to start if tokens are
+; configured without [tls] enabled=true.
 airflow-prod    = $REMSVC_PROD_TOKEN
 airflow-staging = $REMSVC_STAGING_TOKEN
 
-[allowlist]
-; std::regex (ECMAScript) patterns — command must match at least one.
-; Empty section = allow all commands.
+[denylist]
+; std::regex (ECMAScript) patterns — a command matching ANY deny pattern is
+; rejected with PERMISSION_DENIED, regardless of the allowlist.
+; Empty section = no commands are denied by this list.
 ; A malformed pattern causes the server to start in deny-all mode.
+1=^rm\b
+2=^del\b
+3=shutdown
+
+[allowlist]
+; std::regex (ECMAScript) patterns — a command must match at least one.
+; Empty section = all commands are permitted (subject to the denylist above).
+; A malformed pattern causes the server to start in deny-all mode.
+; Evaluation order: denylist is checked first; allowlist is checked second.
 1=^echo\b
 2=^hostname$
 
@@ -145,7 +157,7 @@ debug_level=-1                ; -1 = off; 0-9 = verbose debug
 Start the server with an INI file; individual flags override config values:
 
 ```bash
-# Minimal
+# Minimal (no auth, no TLS — development only)
 RemSvc_server.exe --config server.ini
 
 # Override port and timeout at launch
@@ -157,8 +169,8 @@ RemSvc_server.exe --port 50051 --tls --cert server.crt --key server.key
 # Mutual TLS (client certificate required)
 RemSvc_server.exe --tls --cert server.crt --key server.key --ca-cert ca.pem
 
-# CLI allowlist (replaces INI allowlist when supplied)
-RemSvc_server.exe --config server.ini --allow "^echo\b" --allow "^hostname$"
+# CLI allowlist and denylist (replace the INI lists when supplied)
+RemSvc_server.exe --config server.ini --allow "^echo\b" --allow "^hostname$" --deny "^rm\b"
 ```
 
 Full CLI reference:
@@ -172,6 +184,7 @@ Full CLI reference:
 | `--key`                 | —        | Server private key PEM (required with `--tls`)                        |
 | `--ca-cert`             | —        | CA certificate PEM; enables mutual TLS (client certificate required)  |
 | `--cmd-timeout-ms`      | `30000`  | Per-command child-process kill timeout in milliseconds                |
+| `--deny`                | —        | Denied command regex (repeatable; replaces the INI denylist); evaluated before `--allow` |
 | `--allow`               | —        | Allowed command regex (repeatable; replaces the INI allowlist)        |
 | `--log-level-override`  | —        | Override log level: `trace` \| `debug` \| `info` \| `warn` \| `error` |
 | `--log-file-override`   | —        | Override log file path from config                                    |
@@ -198,10 +211,10 @@ Create a connection of type `remsvc`:
 # Insecure, no auth (development only)
 export AIRFLOW_CONN_REMSVC_DEFAULT='remsvc://remotehost:50051?extra={}'
 
-# Bearer token only (insecure channel — not recommended for production)
-export AIRFLOW_CONN_REMSVC_DEFAULT='remsvc://remotehost:50051?extra={"bearer_token":"secret-prod-token"}'
+# TLS, no auth
+export AIRFLOW_CONN_REMSVC_DEFAULT='remsvc://remotehost:50051?extra={"use_ssl":true,"ca_cert_path":"/etc/ssl/ca.pem"}'
 
-# TLS + bearer token (recommended for production)
+# TLS + bearer token (required for auth — server rejects auth tokens over a plaintext channel)
 export AIRFLOW_CONN_REMSVC_DEFAULT='remsvc://remotehost:50051?extra={"use_ssl":true,"ca_cert_path":"/etc/ssl/ca.pem","bearer_token":"secret-prod-token"}'
 ```
 
@@ -308,12 +321,25 @@ by that CA.
 > Bearer tokens over a plaintext channel provide identity but not
 > confidentiality.  Always use TLS in production.
 
-### Command allowlist
+### Command filtering (denylist + allowlist)
 
-Configure `[allowlist]` with `std::regex` (ECMAScript) patterns.  A command
-must match at least one pattern to be executed.  An empty section permits all
-commands.  A malformed regex pattern causes the server to enter **deny-all**
-mode at startup until the config is corrected and the server restarted.
+Inbound commands are filtered through two independent regex lists before
+execution.  Both lists use `std::regex` ECMAScript patterns.  The evaluation
+order is fixed: **denylist is checked first, allowlist is checked second**.
+
+A command is executed if and only if:
+1. It does **not** match any pattern in `[denylist]` (if the denylist is non-empty), **and**
+2. It matches at least one pattern in `[allowlist]` (if the allowlist is non-empty).
+
+| List | INI section | CLI flag | Empty list behaviour |
+|------|-------------|----------|----------------------|
+| Denylist | `[denylist]` | `--deny` | No commands are denied by this list |
+| Allowlist | `[allowlist]` | `--allow` | All commands are permitted |
+
+A malformed regex pattern in either list causes the server to enter **deny-all**
+mode at startup — every command is rejected with `PERMISSION_DENIED` until the
+config is corrected and the server restarted.  This is a deliberate fail-safe:
+a bad pattern must never silently open an unintended hole.
 
 ### Integrity checking
 

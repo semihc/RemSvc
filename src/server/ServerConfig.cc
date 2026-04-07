@@ -41,17 +41,18 @@ std::string expandEnvVars(const std::string& s)
             }
         }
 
+        std::size_t name_end = i;  // end of the variable name (before any '}')
         if (braced) {
             if (i < s.size() && s[i] == '}') ++i;  // skip '}'
             else {
                 // Malformed ${...; emit literally and continue.
                 result += "${";
-                result.append(s, start, i - start);
+                result.append(s, start, name_end - start);
                 continue;
             }
         }
 
-        std::string varname(s, start, i - start);
+        std::string varname(s, start, name_end - start);
         if (varname.empty()) {
             result += '$';  // bare '$' with no name — keep as-is
             continue;
@@ -92,6 +93,11 @@ std::string loadServerConfig(const std::string& path, ServerConfig& cfg)
         cfg.cmdTimeoutMs = ini.value("cmd_timeout_ms").toInt();
     ini.endGroup();
 
+    if (cfg.port <= 0 || cfg.port > 65535)
+        return "config: port must be in range 1-65535 (got " + std::to_string(cfg.port) + ")";
+    if (cfg.cmdTimeoutMs <= 0)
+        return "config: cmd_timeout_ms must be positive (got " + std::to_string(cfg.cmdTimeoutMs) + ")";
+
     // ── [tls] ─────────────────────────────────────────────────────────────────
     // Cert/key/CA paths support $VAR and ${VAR} environment-variable expansion
     // so that paths like "$HOME/certs/server.crt" work without hardcoding user
@@ -120,6 +126,21 @@ std::string loadServerConfig(const std::string& path, ServerConfig& cfg)
             std::string pat = ini.value(k).toString().toStdString();
             if (!pat.empty())
                 cfg.allowlist.push_back(pat);
+        }
+    }
+    ini.endGroup();
+
+    // ── [denylist] ────────────────────────────────────────────────────────────
+    ini.beginGroup("denylist");
+    const QStringList denyKeys = ini.childKeys();
+    if (!denyKeys.isEmpty()) {
+        cfg.denylist.clear();
+        QStringList sortedDeny = denyKeys;
+        sortedDeny.sort();
+        for (const QString& k : sortedDeny) {
+            std::string pat = ini.value(k).toString().toStdString();
+            if (!pat.empty())
+                cfg.denylist.push_back(pat);
         }
     }
     ini.endGroup();

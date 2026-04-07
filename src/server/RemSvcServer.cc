@@ -36,7 +36,7 @@ int main(int argc, char *argv[]) {
         CLI::App pre;
         pre.add_option("--config", configFile, "INI configuration file");
         pre.allow_extras(true);
-        try { pre.parse(argc, argv); } catch (...) {}
+        try { pre.parse(argc, argv); } catch (const CLI::ParseError&) {}
     }
 
     // ── Step 2: load INI config (provides defaults for all settings) ─────────
@@ -77,6 +77,10 @@ int main(int argc, char *argv[]) {
     cli_app.add_option("--allow", allowlist,
                        "Allowed command regex pattern (repeatable; empty = allow all)");
 
+    std::vector<std::string> denylist = cfg.denylist;
+    cli_app.add_option("--deny", denylist,
+                       "Denied command regex pattern (repeatable; deny takes precedence over allow)");
+
     // Logging overrides
     std::string logFile  = cfg.logFile;
     std::string logLevel = cfg.logLevel;
@@ -91,6 +95,11 @@ int main(int argc, char *argv[]) {
 
     if (tls && (certFile.empty() || keyFile.empty())) {
         std::cerr << "--tls requires both --cert and --key\n";
+        return 1;
+    }
+
+    if (!tls && !cfg.authTokens.empty()) {
+        std::cerr << "Error: bearer-token authentication requires TLS (--tls --cert ... --key ...)\n";
         return 1;
     }
 
@@ -123,7 +132,7 @@ int main(int argc, char *argv[]) {
     std::optional<TlsConfig> tlsConfig;
     if (tls) tlsConfig = TlsConfig{certFile, keyFile, caFile};
 
-    GrpcServerThread grpcThread{port, tlsConfig, allowlist, cfg.authTokens, cfg.cmdTimeoutMs};
+    GrpcServerThread grpcThread{port, tlsConfig, allowlist, denylist, cfg.authTokens, cmdTimeoutMs};
     Log(info, "Starting gRPC Server at port {}", port);
     grpcThread.start();
 

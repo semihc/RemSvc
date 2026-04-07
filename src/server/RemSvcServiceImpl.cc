@@ -1,5 +1,6 @@
 #include "RemSvcServiceImpl.hh"
 
+#include <QDeadlineTimer>
 #include <QProcess>
 #include <QStandardPaths>
 #include "Log.hh"
@@ -78,8 +79,8 @@ int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
         uid_t uid = pw.pw_uid;
         gid_t gid = pw.pw_gid;
         prg.setChildProcessModifier([uid, gid]() {
-            ::setgid(gid);
-            ::setuid(uid);
+            if (::setgid(gid) != 0 || ::setuid(uid) != 0)
+                ::_exit(125);  // 125: privilege-drop failed — child must not execute
         });
         Log(RS::info, "runInProcess: will execute as uid={} gid={} ({})", uid, gid, cmdusr);
     }
@@ -135,14 +136,12 @@ int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
     errAll += prg.readAllStandardError();
 
     int rv = prg.exitCode();
-    QByteArray outStr = std::move(outAll);
-    QByteArray errStr = std::move(errAll);
 
-    out = outStr.constData();
-    Log(RS::debug, "runInProcess out={}", outStr.constData());
-    if (!errStr.isEmpty()) {
-        err = errStr.constData();
-        Log(RS::error, "runInProcess err={}", errStr.constData());
+    out = std::string(outAll.constData(), outAll.size());
+    Log(RS::debug, "runInProcess out={}", out);
+    if (!errAll.isEmpty()) {
+        err = std::string(errAll.constData(), errAll.size());
+        Log(RS::error, "runInProcess err={}", err);
     }
 
     return rv;
@@ -151,8 +150,14 @@ int runInProcess(std::string_view cmd, int cmdtyp, std::string_view cmdusr,
 
 // ── RemSvcServiceImpl ─────────────────────────────────────────────────────────
 
-RemSvcServiceImpl::RemSvcServiceImpl(CmdRunner runner, std::vector<std::string> allowlist)
-    : m_runner(std::move(runner))
+RemSvcServiceImpl::RemSvcServiceImpl(CmdRunner runner, std::vector<std::string> allowlist,
+                                     int timeoutMs, std::vector<std::string> denylist)
+    : m_runner(runner ? std::move(runner)
+                      : CmdRunner([timeoutMs](std::string_view cmd, int cmdtyp,
+                                              std::string_view cmdusr,
+                                              std::string& out, std::string& err) {
+                            return runInProcess(cmd, cmdtyp, cmdusr, out, err, timeoutMs);
+                        }))
     , m_startTime(std::chrono::steady_clock::now())
 {
     // Compile each pattern string into a std::regex at construction time.
@@ -175,7 +180,7 @@ RemSvcServiceImpl::RemSvcServiceImpl(CmdRunner runner, std::vector<std::string> 
                 "ALL commands will be denied until the config is corrected.",
                 pat, e.what());
             m_denyAll = true;
-            m_allowlist.clear();   // no partial list; deny-all is the sole guard
+            m_allowlist.clear();
             break;
         }
     }
@@ -185,16 +190,43 @@ RemSvcServiceImpl::RemSvcServiceImpl(CmdRunner runner, std::vector<std::string> 
             "deny-all mode is active ({} pattern(s) discarded).",
             allowlist.size());
     }
+
+    m_denylist.reserve(denylist.size());
+    for (const auto& pat : denylist) {
+        try {
+            m_denylist.emplace_back(pat,
+                std::regex_constants::ECMAScript |
+                std::regex_constants::optimize);
+        } catch (const std::regex_error& e) {
+            Log(RS::error,
+                "RemSvcServiceImpl: invalid denylist regex '{}': {} — "
+                "ALL commands will be denied until the config is corrected.",
+                pat, e.what());
+            m_denyAll = true;
+            m_denylist.clear();
+            break;
+        }
+    }
+    if (!denylist.empty() && m_denyAll && m_denylist.empty()) {
+        Log(RS::warn,
+            "RemSvcServiceImpl: denylist compilation failed; "
+            "deny-all mode is active ({} pattern(s) discarded).",
+            denylist.size());
+    }
 }
 
 
 std::string RemSvcServiceImpl::checkAllowed(std::string_view cmd) const {
-    // Deny-all mode: triggered when any allowlist pattern failed to compile.
+    // Deny-all mode: triggered when any list pattern failed to compile.
     if (m_denyAll)
         return "all commands denied: allowlist configuration is invalid (check server logs)";
-    // Empty, valid allowlist = no restriction configured; permit all.
-    if (m_allowlist.empty()) return {};
     std::string s(cmd);
+    // Denylist takes precedence: if the command matches any deny pattern, reject it.
+    for (const auto& rx : m_denylist)
+        if (std::regex_search(s, rx))
+            return "command denied by denylist: " + s;
+    // Empty, valid allowlist = no allowlist restriction configured; permit all.
+    if (m_allowlist.empty()) return {};
     for (const auto& rx : m_allowlist)
         if (std::regex_search(s, rx)) return {};
     return "command not permitted by allowlist: " + s;

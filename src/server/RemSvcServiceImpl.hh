@@ -60,15 +60,20 @@ struct ICmdStream {
 
 
 // gRPC service implementation.
-// CmdRunner and an optional command allowlist are injected at construction.
+// CmdRunner and optional command allowlist/denylist are injected at construction.
 //
 // allowlist: if non-empty, each entry is a std::regex pattern; a command
 //            is permitted only if it matches (regex_search) at least one
 //            pattern.  Empty allowlist = accept all commands.
+// denylist:  if non-empty, each entry is a std::regex pattern; a command is
+//            rejected if it matches any deny pattern, regardless of allowlist.
+//            Denylist takes precedence over allowlist.
 class RemSvcServiceImpl final : public RemSvc::Service {
 public:
-    explicit RemSvcServiceImpl(CmdRunner                runner    = runInProcess,
-                               std::vector<std::string> allowlist = {});
+    explicit RemSvcServiceImpl(CmdRunner                runner    = {},
+                               std::vector<std::string> allowlist = {},
+                               int                      timeoutMs = 30000,
+                               std::vector<std::string> denylist  = {});
 
     grpc::Status Ping(grpc::ServerContext*  context,
                       const RS::PingMsg*    ping,
@@ -91,10 +96,10 @@ public:
 
 private:
     CmdRunner               m_runner;
-    std::vector<std::regex> m_allowlist;   // compiled from constructor patterns
-    // True if any allowlist pattern failed to compile.  When set, checkAllowed()
-    // denies every command — fail-safe behaviour prevents bad config from opening
-    // an unintended hole.
+    std::vector<std::regex> m_allowlist;   // compiled from constructor allowlist patterns
+    std::vector<std::regex> m_denylist;    // compiled from constructor denylist patterns
+    // True if any pattern in either list failed to compile.  When set,
+    // checkAllowed() denies every command — fail-safe behaviour.
     bool                    m_denyAll{false};
     std::atomic<int64_t>    m_commandsExecuted{0};
     std::chrono::steady_clock::time_point m_startTime;

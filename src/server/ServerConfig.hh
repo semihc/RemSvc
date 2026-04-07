@@ -23,9 +23,18 @@
 //   key=/path/to/server.key
 //   ca=                          ; empty = no mutual TLS
 //
+//   [denylist]
+//   ; std::regex patterns — a command matching ANY deny pattern is rejected
+//   ; with PERMISSION_DENIED, regardless of the allowlist.
+//   ; An empty section means no commands are denied by this list.
+//   ; Evaluated before the allowlist.
+//   1=^rm\b
+//   2=^del\b
+//
 //   [allowlist]
-//   ; Each pattern entry is a std::regex matched against the command string.
-//   ; An empty section means all commands are permitted.
+//   ; std::regex patterns — a command must match at least one to be permitted.
+//   ; An empty section means all commands are permitted (subject to denylist).
+//   ; Evaluated after the denylist.
 //   1=^echo\b
 //   2=^dir\b
 //
@@ -59,8 +68,11 @@ struct ServerConfig {
     std::string keyFile;
     std::string caFile;
 
-    // Authorization — regex patterns; empty list = allow all commands.
+    // Authorization — allow/deny regex patterns.
+    // allowlist: empty = allow all; non-empty = only matching commands are permitted.
+    // denylist:  non-empty = matching commands are always rejected (overrides allowlist).
     std::vector<std::string> allowlist;
+    std::vector<std::string> denylist;
 
     // Authentication — identity → bearer-token map.
     // Empty map = authentication disabled (all callers permitted).
