@@ -178,9 +178,104 @@ pytest ../tst/unit/prv/test_remsvc_async.py -v
 pytest ../tst/unit/prv/test_remsvc_hook.py -v
 ```
 
+Tests can also be run from the repository root without `cd`:
+
+```bash
+PYTHONPATH=prv pytest tst/unit/prv -v
+```
+
 > **Regenerating stubs manually** — only needed if `src/proto/RemSvc.proto` changes
 > and you are working in an editable install without rebuilding:
 >
 > ```bash
 > ./regen_proto.sh
 > ```
+
+## Building a wheel
+
+The wheel is self-contained — gRPC stubs are compiled from `src/proto/RemSvc.proto`
+at build time by `hatch_build.py` and bundled into the wheel.  No manual proto
+generation step is required on the target machine.
+
+```bash
+cd prv/
+
+# Install the build frontend (one-time)
+pip install build
+
+# Build the wheel
+python -m build --wheel
+```
+
+The wheel is written to `prv/dist/airflow_provider_remsvc-1.0.0-py3-none-any.whl`.
+
+> **Why wheel only?**  The sdist (`.tar.gz`) is not suitable for deployment
+> because `hatch_build.py` resolves the `.proto` file relative to the repository
+> root, which is not present inside a standalone sdist tarball.  Always use
+> `--wheel`.
+
+## Deploying to a bare-metal / VM Airflow instance
+
+### 1. Copy the wheel to the Airflow server
+
+```bash
+scp prv/dist/airflow_provider_remsvc-1.0.0-py3-none-any.whl user@airflow-host:/tmp/
+```
+
+### 2. Install into the Airflow virtualenv
+
+```bash
+ssh user@airflow-host
+source /path/to/airflow-venv/bin/activate
+
+# First install
+pip install /tmp/airflow_provider_remsvc-1.0.0-py3-none-any.whl
+
+# Reinstall (same version number, updated content)
+pip install --force-reinstall --no-deps /tmp/airflow_provider_remsvc-1.0.0-py3-none-any.whl
+```
+
+Use `--no-deps` when force-reinstalling to avoid pip upgrading or downgrading
+`grpcio` and `protobuf` alongside the provider.
+
+### 3. Verify the provider is detected
+
+```bash
+airflow providers list | grep remsvc
+```
+
+Expected output:
+
+```
+airflow-provider-remsvc  |  Remote command execution for Apache Airflow via RemSvc gRPC  |  1.0.0
+```
+
+### 4. Restart Airflow components
+
+```bash
+sudo systemctl restart airflow-scheduler
+sudo systemctl restart airflow-triggerer   # required — RemSvcTrigger runs here
+sudo systemctl restart airflow-api-server  # picks up new connection type in the UI (Airflow 3.x)
+```
+
+The **triggerer** must be running. The deferrable operator offloads all gRPC
+communication to the triggerer process; if it is stopped, deferred tasks will
+hang indefinitely waiting to be resumed.
+
+### 5. Create the Airflow connection
+
+In the Airflow UI go to **Admin → Connections** and create a new connection:
+
+| Field | Value |
+|-------|-------|
+| Connection Id | `remsvc_default` (or any name passed to `grpc_conn_id`) |
+| Connection Type | `RemSvc gRPC` |
+| Host | hostname or IP of the RemSvc server |
+| Port | `50051` (or the port configured on the server) |
+| Extra | `{"use_ssl": true, "bearer_token": "secret-token"}` |
+
+Alternatively, set the connection via environment variable before starting Airflow:
+
+```bash
+export AIRFLOW_CONN_REMSVC_DEFAULT='remsvc://remotehost:50051?extra={"use_ssl":true,"bearer_token":"secret-token"}'
+```
