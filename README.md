@@ -16,7 +16,8 @@ Author: Semih Cemiloglu
 
 ## Architecture
 
-![RemSvc Architecture](doc/architecture-component.png)
+![Airflow Components](doc/AirflowComponents.png)
+![Airflow+RemSvc Architecture](doc/airflow_remsvc.svg)
 
 > See the [`doc/`](doc/) directory for detailed Mermaid diagrams:
 > - [Airflow deferrable execution flow](doc/diagram-airflow-deferrable-flow.md)
@@ -34,12 +35,21 @@ src/proto/RemSvc.proto          ← single source of truth (service contract)
 │
 ├── src/pyclient/               ← Python CLI client + stub generator
 │
-└── prv/                        ← Apache Airflow provider package
-    ├── remsvc_provider/
-    │   ├── hooks/remsvc.py     ← connection management (TLS, channel pool)
-    │   ├── operators/remsvc.py ← deferrable operator
-    │   └── triggers/remsvc.py  ← async trigger (RemCmdStrm bidirectional stream)
-    └── remsvc_proto/           ← auto-generated Python gRPC stubs (built on install)
+├── prv/                        ← Apache Airflow provider package
+│   ├── remsvc_provider/
+│   │   ├── hooks/remsvc.py     ← connection management (TLS, channel pool)
+│   │   ├── operators/remsvc.py ← deferrable operator
+│   │   └── triggers/remsvc.py  ← async trigger (RemCmdStrm bidirectional stream)
+│   └── remsvc_proto/           ← auto-generated Python gRPC stubs (built on install)
+│
+└── doc/                        ← Documentation
+    ├── AirflowComponents.png
+    ├── airflow_remsvc.svg
+    ├── architecture-component.png
+    ├── diagram-airflow-deferrable-flow.md
+    ├── diagram-deployment-topology.md
+    ├── diagram-remcmdstrm-tid-correlation.md
+    └── samples/                ← Samples
 ```
 
 ### Command execution model
