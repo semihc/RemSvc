@@ -16,7 +16,9 @@ Author: Semih Cemiloglu
 
 ## Architecture
 
+### Airflow architecture, functional components
 ![Airflow Components](doc/AirflowComponents.png)
+### Airflow components, augmented with RemSvc 
 ![Airflow+RemSvc Architecture](doc/airflow_remsvc.svg)
 
 > See the [`doc/`](doc/) directory for detailed Mermaid diagrams:
