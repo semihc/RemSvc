@@ -109,10 +109,13 @@ class RemSvcOperator(BaseOperator):
     stream_timeout:
         Maximum seconds for the entire stream, enforced at both the Python
         asyncio level and as the gRPC deadline on the stream (default 3600 s).
-        If the gRPC channel drops mid-stream (e.g. a network blip), the trigger
-        raises ``AioRpcError(UNAVAILABLE)`` and the task fails immediately —
-        there is no automatic reconnect.  For resilience, set ``retries`` on
-        the operator or wrap in an Airflow retry policy.
+        If the gRPC channel drops before any commands have been dispatched, the
+        trigger retries up to ``_MAX_ATTEMPTS`` times with exponential back-off.
+        If the channel drops after one or more commands have already been sent,
+        the trigger fails immediately with ``FAILED`` — retrying would re-execute
+        those commands and risk duplicate side effects.  For resilience against
+        mid-stream drops, set ``retries`` on the operator or wrap in an Airflow
+        retry policy.
     result_handler:
         Optional callable applied to the raw ``{tid: result_dict}`` mapping
         before it is stored in XCom.  Defaults to a sorted list by tid.

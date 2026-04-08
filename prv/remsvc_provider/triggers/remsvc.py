@@ -168,8 +168,6 @@ class RemSvcTrigger(BaseTrigger):
             len(self.commands), self.stream_timeout,
         )
 
-        last_exc: grpc.aio.AioRpcError | None = None
-
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             # sent_ref[0] is incremented by _write() after each stream.write()
             # call succeeds.  We read it in the except blocks below to decide
@@ -228,7 +226,6 @@ class RemSvcTrigger(BaseTrigger):
                         "(attempt %d/%d): code=%s details=%s — retrying in %.1fs",
                         attempt, _MAX_ATTEMPTS, exc.code(), exc.details(), delay,
                     )
-                    last_exc = exc
                     await asyncio.sleep(delay)
                     continue
 
@@ -254,28 +251,6 @@ class RemSvcTrigger(BaseTrigger):
                 })
                 return
 
-        # All retry attempts exhausted with a retryable error on the last one.
-        if last_exc is None:
-            # Should not happen: the loop only reaches here after a retryable
-            # AioRpcError set last_exc and continued.  Guard defensively.
-            yield TriggerEvent({
-                EVT_STATE:   JobState.FAILED.value,
-                EVT_RESULTS: {},
-                EVT_ERROR:   f"All {_MAX_ATTEMPTS} attempts failed (unknown error).",
-            })
-            return
-        log.error(
-            "RemSvcTrigger: all %d attempts failed.  Last error: code=%s details=%s",
-            _MAX_ATTEMPTS, last_exc.code(), last_exc.details(),
-        )
-        yield TriggerEvent({
-            EVT_STATE:   JobState.FAILED.value,
-            EVT_RESULTS: {},
-            EVT_ERROR:   (
-                f"All {_MAX_ATTEMPTS} attempts failed.  "
-                f"Last: gRPC {last_exc.code()}: {last_exc.details()}"
-            ),
-        })
 
     # ------------------------------------------------------------------
     # Stream execution

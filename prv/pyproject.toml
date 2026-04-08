@@ -38,9 +38,11 @@ dev = [
     "mypy-protobuf>=3.4",
 ]
 
-# Airflow discovers the provider via this entry point
+# Airflow discovers the provider via this entry point.
+# Must point to the callable function, not the module — Airflow calls
+# entry_point.load()() and a module object is not callable.
 [project.entry-points."apache_airflow_provider"]
-remsvc = "remsvc_provider"
+remsvc = "remsvc_provider:get_provider_info"
 
 [tool.hatch.build.targets.wheel]
 # Both remsvc_provider/ and remsvc_proto/ are included in the wheel.

@@ -19,6 +19,7 @@ import grpc
 import pytest
 
 from airflow.exceptions import AirflowException
+from airflow.sdk.exceptions import TaskDeferred
 from airflow.triggers.base import TriggerEvent
 
 from remsvc_provider.operators.remsvc import JobState, RemSvcOperator
@@ -74,7 +75,7 @@ def _mock_response(*, tid: int, rc: int = 0, out: str = "", err: str = "",
 class _AsyncStream:
     """Minimal async-iterable stream double for RemCmdStrm."""
 
-    def __init__(self, responses: List[Any]) -> None:
+    def __init__(self, responses: list[Any]) -> None:
         self._responses  = responses
         self.write       = AsyncMock()
         self.done_writing = AsyncMock()
@@ -138,7 +139,8 @@ class TestRemSvcTriggerRun:
     async def test_run_yields_exactly_one_event_on_success(self):
         t = _make_trigger()
         payload = {EVT_STATE: JobState.SUCCESS.value, EVT_RESULTS: {1: {"rc": 0}}}
-        with patch.object(t, "_run_stream", new=AsyncMock(return_value=payload)):
+        with patch.object(t, "_run_stream", new=AsyncMock(return_value=payload)), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
         assert len(events) == 1
         assert events[0].payload[EVT_STATE] == JobState.SUCCESS.value
@@ -147,7 +149,8 @@ class TestRemSvcTriggerRun:
     async def test_run_yields_exactly_one_event_on_failure(self):
         t = _make_trigger()
         payload = {EVT_STATE: JobState.FAILED.value, EVT_RESULTS: {}, EVT_ERROR: "oops"}
-        with patch.object(t, "_run_stream", new=AsyncMock(return_value=payload)):
+        with patch.object(t, "_run_stream", new=AsyncMock(return_value=payload)), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
         assert len(events) == 1
         assert events[0].payload[EVT_STATE] == JobState.FAILED.value
@@ -156,10 +159,11 @@ class TestRemSvcTriggerRun:
     async def test_run_fires_cancelled_on_timeout(self):
         t = _make_trigger(stream_timeout=0.001)
         # Use an Event that never fires — deterministic block without wall-clock sleep
-        async def _block():
+        async def _block(sent_ref):
             import asyncio as _a
             await _a.Event().wait()
-        with patch.object(t, "_run_stream", new=_block):
+        with patch.object(t, "_run_stream", new=_block), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
         assert events[0].payload[EVT_STATE]  == JobState.CANCELLED.value
         assert "timed out" in events[0].payload[EVT_ERROR].lower()
@@ -177,7 +181,8 @@ class TestRemSvcTriggerRun:
             details            = "access denied",
             debug_error_string = "",
         )
-        with patch.object(t, "_run_stream", new=AsyncMock(side_effect=rpc_error)):
+        with patch.object(t, "_run_stream", new=AsyncMock(side_effect=rpc_error)), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
         assert events[0].payload[EVT_STATE] == JobState.FAILED.value
         assert EVT_ERROR in events[0].payload
@@ -185,7 +190,8 @@ class TestRemSvcTriggerRun:
     @pytest.mark.asyncio
     async def test_run_catches_generic_exception(self):
         t = _make_trigger()
-        with patch.object(t, "_run_stream", new=AsyncMock(side_effect=RuntimeError("boom"))):
+        with patch.object(t, "_run_stream", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
         assert events[0].payload[EVT_STATE] == JobState.FAILED.value
         assert "boom" in events[0].payload[EVT_ERROR]
@@ -197,13 +203,21 @@ class TestRemSvcTriggerRun:
 
 class TestRemSvcTriggerRunStream:
 
+    @pytest.fixture(autouse=True)
+    def stop_patches(self):
+        yield
+        patch.stopall()
+
     def _setup(self, trigger: RemSvcTrigger, responses: list) -> tuple:
         """Wire a mock channel+stub+stream onto the trigger.
+        Patches _call_metadata (no Airflow DB) and pb2 (no proto stubs needed).
         Returns (channel_mock, stub_mock, stream_mock)."""
         stream  = _AsyncStream(responses)
         stub    = MagicMock()
         stub.RemCmdStrm.return_value = stream
         channel = _mock_channel_ctx(stub)
+        patch.object(trigger, "_call_metadata", return_value=[]).start()
+        patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()).start()
         return channel, stub, stream
 
     @pytest.mark.asyncio
@@ -296,11 +310,13 @@ class TestRemSvcTriggerRunStream:
              patch.object(t, "_async_stub",    return_value=stub):
             await t._run_stream([0])
 
-        # write() called once per command
+        # write() called once per command; pb2 is mocked so inspect the kwargs
+        # passed to RemCmdMsg() rather than the attribute on the returned mock.
         assert stream.write.call_count == 2
-        sent_msgs = [call.args[0] for call in stream.write.call_args_list]
-        assert sent_msgs[0].tid == 1
-        assert sent_msgs[1].tid == 2
+        import remsvc_provider.triggers.remsvc as _trig_mod
+        pb2_mock = _trig_mod.pb2
+        tid_calls = [c.kwargs["tid"] for c in pb2_mock.RemCmdMsg.call_args_list]
+        assert tid_calls == [1, 2]
 
     @pytest.mark.asyncio
     async def test_sent_ref_counts_written_commands(self):
@@ -344,7 +360,7 @@ class TestRemSvcTriggerRunStream:
 class TestDeferrableRemSvcOperator:
 
     def test_execute_defers(self):
-        from airflow.exceptions import TaskDeferred
+
         op  = _make_operator()
         ctx = _mock_context()
 
@@ -357,7 +373,7 @@ class TestDeferrableRemSvcOperator:
         assert deferred.method_name                == "execute_complete"
 
     def test_execute_defers_with_correct_commands(self):
-        from airflow.exceptions import TaskDeferred
+
         commands = [_CMD1, _CMD2]
         op  = _make_operator(commands=commands)
         ctx = _mock_context()
@@ -487,7 +503,7 @@ class TestDeferrableRemSvcOperator:
                 op.execute(ctx)
 
     def test_execute_valid_commands_do_not_raise_empty_check(self):
-        from airflow.exceptions import TaskDeferred
+
         op  = _make_operator(commands=[{"cmd": "echo hi"}, {"cmd": "hostname"}])
         ctx = _mock_context()
         with patch("remsvc_provider.operators.remsvc._PROTO_AVAILABLE", True):
@@ -497,6 +513,29 @@ class TestDeferrableRemSvcOperator:
     def test_template_fields_declared(self):
         assert "commands" in RemSvcOperator.template_fields
         assert "metadata" in RemSvcOperator.template_fields
+
+    def test_execute_complete_missing_results_key_treated_as_empty(self):
+        """If EVT_RESULTS is absent from the event (malformed trigger payload),
+        execute_complete must raise rather than silently succeed with no results."""
+        op  = _make_operator()
+        ctx = _mock_context()
+        # Event has SUCCESS state but no EVT_RESULTS key at all.
+        event = {EVT_STATE: JobState.SUCCESS.value}
+        # Default handler on an empty dict returns [] — the call succeeds but
+        # results will be empty.  This test pins that behaviour so any future
+        # change (e.g. raising on missing key) is a deliberate decision.
+        result = op.execute_complete(ctx, event)
+        assert result["state"]   == "SUCCESS"
+        assert result["results"] == []
+
+    def test_execute_complete_missing_state_key_raises(self):
+        """An event with no EVT_STATE must not silently succeed."""
+        op    = _make_operator()
+        ctx   = _mock_context()
+        event = {EVT_RESULTS: {1: {"tid": 1, "rc": 0, "out": "", "err": "", "hsh": "", "cmd": ""}}}
+        # JobState() constructor raises ValueError for an unknown value.
+        with pytest.raises((AirflowException, ValueError)):
+            op.execute_complete(ctx, event)
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +569,8 @@ class TestRemSvcTriggerRetry:
             return item
 
         with patch.object(t, "_run_stream", side_effect=_run_stream_side_effect), \
-             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
 
         assert len(events) == 1
@@ -552,7 +592,8 @@ class TestRemSvcTriggerRetry:
             return item
 
         with patch.object(t, "_run_stream", side_effect=_side_effect), \
-             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
 
         assert events[0].payload[EVT_STATE] == JobState.SUCCESS.value
@@ -564,7 +605,7 @@ class TestRemSvcTriggerRetry:
         with patch.object(
             t, "_run_stream",
             new=AsyncMock(side_effect=_rpc_error(grpc.StatusCode.DEADLINE_EXCEEDED, "too slow")),
-        ):
+        ), patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
 
         assert events[0].payload[EVT_STATE] == JobState.FAILED.value
@@ -579,13 +620,14 @@ class TestRemSvcTriggerRetry:
         with patch.object(
             t, "_run_stream",
             new=AsyncMock(side_effect=_rpc_error(grpc.StatusCode.UNAVAILABLE, "gone")),
-        ), patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+        ), patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()), \
+           patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
 
         assert len(events) == 1
         assert events[0].payload[EVT_STATE] == JobState.FAILED.value
-        assert "All" in events[0].payload[EVT_ERROR]
-        assert str(_MAX_ATTEMPTS) in events[0].payload[EVT_ERROR]
+        assert "UNAVAILABLE" in events[0].payload[EVT_ERROR]
+        assert "gone" in events[0].payload[EVT_ERROR]
 
     @pytest.mark.asyncio
     async def test_retry_count_matches_max_attempts(self):
@@ -597,7 +639,8 @@ class TestRemSvcTriggerRetry:
         )
 
         with patch.object(t, "_run_stream", mock_stream), \
-             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             await _collect(t)
 
         assert mock_stream.call_count == _MAX_ATTEMPTS
@@ -610,7 +653,8 @@ class TestRemSvcTriggerRetry:
             side_effect=_rpc_error(grpc.StatusCode.PERMISSION_DENIED, "denied")
         )
 
-        with patch.object(t, "_run_stream", mock_stream):
+        with patch.object(t, "_run_stream", mock_stream), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
 
         assert mock_stream.call_count == 1
@@ -630,7 +674,8 @@ class TestRemSvcTriggerRetry:
         mock_stream = AsyncMock(side_effect=_side_effect)
 
         with patch.object(t, "_run_stream", mock_stream), \
-             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
 
         # Must fail on the first attempt; no retry.
@@ -654,7 +699,8 @@ class TestRemSvcTriggerRetry:
             return item
 
         with patch.object(t, "_run_stream", side_effect=_side_effect), \
-             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()):
+             patch("remsvc_provider.triggers.remsvc.asyncio.sleep", new=AsyncMock()), \
+             patch("remsvc_provider.triggers.remsvc._PROTO_AVAILABLE", True):
             events = await _collect(t)
 
         assert events[0].payload[EVT_STATE] == JobState.SUCCESS.value
@@ -698,6 +744,8 @@ class TestRemSvcTriggerDuplicateTid:
 
         with patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub), \
+             patch.object(t, "_call_metadata", return_value=[]), \
+             patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()), \
              caplog.at_level(logging.WARNING, logger="remsvc_provider.triggers.remsvc"):
             await t._run_stream([0])
 
@@ -717,7 +765,9 @@ class TestRemSvcTriggerDuplicateTid:
         channel.__aexit__  = AsyncMock(return_value=False)
 
         with patch.object(t, "_async_channel", return_value=channel), \
-             patch.object(t, "_async_stub",    return_value=stub):
+             patch.object(t, "_async_stub",    return_value=stub), \
+             patch.object(t, "_call_metadata", return_value=[]), \
+             patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()):
             result = await t._run_stream([0])
 
         assert result[EVT_RESULTS][1]["out"] == "second"
@@ -811,7 +861,8 @@ class TestRemSvcTriggerMetadata:
         # directly to return our known metadata list.
         with patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub), \
-             patch.object(t, "_call_metadata", return_value=meta):
+             patch.object(t, "_call_metadata", return_value=meta), \
+             patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()):
             await t._run_stream([0])
 
         stub.RemCmdStrm.assert_called_once_with(

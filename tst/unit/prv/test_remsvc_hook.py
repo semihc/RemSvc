@@ -19,7 +19,12 @@ import pytest
 
 from airflow.exceptions import AirflowException
 
-from remsvc_provider.hooks.remsvc import DEFAULT_PORT, RemSvcHook
+import grpc
+
+from remsvc_provider.hooks.remsvc import (
+    DEFAULT_PORT, RemSvcHook,
+    _async_channel_pool, _channel_pool_key, _get_pooled_channel,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -277,3 +282,90 @@ class TestGetCallMetadata:
     def test_returns_exactly_one_entry(self):
         hook = _make_hook(_make_conn(extra_dejson={"bearer_token": "tok"}))
         assert len(hook.get_call_metadata()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Async channel pool — _get_pooled_channel()
+# ---------------------------------------------------------------------------
+
+class TestAsyncChannelPool:
+    """Tests for the module-level async channel pool in hooks/remsvc.py."""
+
+    def setup_method(self):
+        """Clear the pool before each test to avoid inter-test interference."""
+        _async_channel_pool.clear()
+
+    def test_same_params_returns_same_channel(self):
+        ch = MagicMock()
+        ch.get_state.return_value = grpc.ChannelConnectivity.READY
+        with patch("grpc.aio.insecure_channel", return_value=ch) as mock_create:
+            first  = _get_pooled_channel("host:50051", False, None)
+            second = _get_pooled_channel("host:50051", False, None)
+        assert first is second
+        mock_create.assert_called_once()  # created only once
+
+    def test_different_target_creates_new_channel(self):
+        ch = MagicMock()
+        ch.get_state.return_value = grpc.ChannelConnectivity.READY
+        with patch("grpc.aio.insecure_channel", return_value=ch) as mock_create:
+            _get_pooled_channel("host1:50051", False, None)
+            _get_pooled_channel("host2:50051", False, None)
+        assert mock_create.call_count == 2
+
+    def test_shutdown_channel_is_evicted_and_replaced(self):
+        stale = MagicMock()
+        stale.get_state.return_value = grpc.ChannelConnectivity.SHUTDOWN
+        fresh = MagicMock()
+        fresh.get_state.return_value = grpc.ChannelConnectivity.READY
+
+        with patch("grpc.aio.insecure_channel", side_effect=[stale, fresh]):
+            first  = _get_pooled_channel("host:50051", False, None)
+            # Manually put the stale channel into the pool as if it degraded.
+            key = _channel_pool_key("host:50051", False, None)
+            _async_channel_pool[key] = stale
+            second = _get_pooled_channel("host:50051", False, None)
+
+        assert first  is stale
+        assert second is fresh
+
+    def test_get_state_exception_evicts_and_replaces(self):
+        broken = MagicMock()
+        broken.get_state.side_effect = RuntimeError("channel gone")
+        fresh = MagicMock()
+        fresh.get_state.return_value = grpc.ChannelConnectivity.READY
+
+        key = _channel_pool_key("host:50051", False, None)
+        _async_channel_pool[key] = broken
+
+        with patch("grpc.aio.insecure_channel", return_value=fresh):
+            result = _get_pooled_channel("host:50051", False, None)
+
+        assert result is fresh
+
+    def test_ssl_and_non_ssl_use_separate_pool_entries(self):
+        insecure_ch = MagicMock()
+        insecure_ch.get_state.return_value = grpc.ChannelConnectivity.READY
+        secure_ch = MagicMock()
+        secure_ch.get_state.return_value = grpc.ChannelConnectivity.READY
+
+        with patch("grpc.aio.insecure_channel", return_value=insecure_ch), \
+             patch("grpc.ssl_channel_credentials", return_value=MagicMock()), \
+             patch("grpc.aio.secure_channel", return_value=secure_ch):
+            ch1 = _get_pooled_channel("host:50051", False, None)
+            ch2 = _get_pooled_channel("host:50051", True,  None)
+
+        assert ch1 is not ch2
+
+    def test_different_ca_certs_use_separate_pool_entries(self):
+        ch_a = MagicMock()
+        ch_a.get_state.return_value = grpc.ChannelConnectivity.READY
+        ch_b = MagicMock()
+        ch_b.get_state.return_value = grpc.ChannelConnectivity.READY
+        creds = MagicMock()
+
+        with patch("grpc.ssl_channel_credentials", return_value=creds), \
+             patch("grpc.aio.secure_channel", side_effect=[ch_a, ch_b]):
+            r1 = _get_pooled_channel("host:50051", True, b"CERT_A")
+            r2 = _get_pooled_channel("host:50051", True, b"CERT_B")
+
+        assert r1 is not r2
