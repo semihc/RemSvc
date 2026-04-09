@@ -24,4 +24,9 @@ python3 -m grpc_tools.protoc \
     --grpc_python_out="${STUB_OUT}" \
     "${PROTO_SRC}"/*.proto
 
+# Fix grpc_tools codegen bug: bare `import RemSvc_pb2` fails when installed as
+# a package; rewrite to a package-qualified import.
+sed -i 's/^import RemSvc_pb2 as RemSvc__pb2$/from remsvc_proto import RemSvc_pb2 as RemSvc__pb2/' \
+    "${STUB_OUT}/RemSvc_pb2_grpc.py"
+
 echo "Done. Stubs written to ${STUB_OUT}/"

@@ -15,5 +15,11 @@ def get_provider_info() -> dict:
         "description": "Remote command execution for Apache Airflow via RemSvc gRPC.",
         "versions": ["1.0.0"],
         "min-airflow-version": "3.1.0",
+        "connection-types": [
+            {
+                "connection-type": "remsvc",
+                "hook-class-name": "remsvc_provider.hooks.remsvc.RemSvcHook",
+            }
+        ],
         "cli": [],
     }

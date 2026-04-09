@@ -45,13 +45,10 @@ src/proto/RemSvc.proto          ← single source of truth (service contract)
 │   └── remsvc_proto/           ← auto-generated Python gRPC stubs (built on install)
 │
 └── doc/                        ← Documentation
-    ├── AirflowComponents.png
-    ├── airflow_remsvc.svg
-    ├── architecture-component.png
-    ├── diagram-airflow-deferrable-flow.md
-    ├── diagram-deployment-topology.md
-    ├── diagram-remcmdstrm-tid-correlation.md
-    └── samples/                ← Samples
+    ├── ... (Various design diagrams)
+    └── samples/                ← Sample DAGs for end-to-end testing
+        ├── dag_remsvc_e2e_windows.py
+        └── dag_remsvc_e2e_linux.py
 ```
 
 ### Command execution model

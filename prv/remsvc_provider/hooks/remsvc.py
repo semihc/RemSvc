@@ -38,8 +38,12 @@ import grpc
 import grpc.aio
 
 from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
-from airflow.models import Connection
+try:
+    from airflow.sdk.bases.hook import BaseHook    # Airflow 3.x
+    from airflow.sdk import Connection
+except ImportError:
+    from airflow.hooks.base import BaseHook        # Airflow 2.x
+    from airflow.models import Connection
 
 log = logging.getLogger(__name__)
 
@@ -145,9 +149,23 @@ class RemSvcHook(BaseHook):
     # ------------------------------------------------------------------
 
     def get_conn(self) -> Connection:
-        """Return the raw Airflow Connection object (cached)."""
+        """Return the raw Airflow Connection object (cached).
+
+        Called from synchronous worker context (operator execute/execute_complete).
+        The triggerer uses get_async_conn() instead to avoid sync-in-async warnings.
+        """
         if self._conn is None:
             self._conn = self.get_connection(self.remsvc_conn_id)
+        return self._conn
+
+    async def get_async_conn(self) -> Connection:
+        """Return the connection asynchronously — for use in the triggerer."""
+        if self._conn is None:
+            try:
+                self._conn = await self.aget_connection(self.remsvc_conn_id)
+            except AttributeError:
+                # Fallback for Airflow builds without aget_connection
+                self._conn = self.get_connection(self.remsvc_conn_id)
         return self._conn
 
     def _target(self) -> str:

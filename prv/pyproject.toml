@@ -50,6 +50,13 @@ remsvc = "remsvc_provider:get_provider_info"
 # before the wheel is assembled, so pip install is fully self-contained.
 packages = ["remsvc_provider", "remsvc_proto"]
 
+[tool.hatch.build.targets.editable]
+# Editable installs must add the prv/ parent to sys.path so that both
+# remsvc_provider/ and remsvc_proto/ (siblings under prv/) are importable.
+# Without this, Hatchling writes only the individual package dirs into the
+# .pth file and remsvc_proto is not found at runtime.
+packages = ["remsvc_provider", "remsvc_proto"]
+
 [tool.hatch.build.hooks.custom]
 # Activates hatch_build.py — generates gRPC stubs at build time.
 path = "hatch_build.py"

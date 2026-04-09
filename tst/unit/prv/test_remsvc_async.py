@@ -19,7 +19,10 @@ import grpc
 import pytest
 
 from airflow.exceptions import AirflowException
-from airflow.sdk.exceptions import TaskDeferred
+try:
+    from airflow.sdk.exceptions import TaskDeferred          # Airflow 3.x Task SDK
+except ImportError:
+    from airflow.exceptions import TaskDeferred              # Airflow 2.x / 3.x core
 from airflow.triggers.base import TriggerEvent
 
 from remsvc_provider.operators.remsvc import JobState, RemSvcOperator

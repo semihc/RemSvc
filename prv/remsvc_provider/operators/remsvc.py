@@ -41,13 +41,19 @@ from enum import Enum
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
-from airflow.utils.context import Context
+try:
+    from airflow.sdk import DAG  # noqa: F401 — probe for Airflow 3.x SDK
+    from airflow.sdk.bases.operator import BaseOperator
+    from airflow.sdk.types import Context
+    from airflow.exceptions import AirflowException
+except ImportError:
+    from airflow.exceptions import AirflowException  # type: ignore[assignment]
+    from airflow.models import BaseOperator           # type: ignore[assignment]
+    from airflow.utils.context import Context         # type: ignore[assignment]
 
 # Check that stubs have been generated — actual proto types are used in the trigger.
 try:
-    import remsvc_proto.remsvc_pb2  # type: ignore  # noqa: F401
+    import remsvc_proto.RemSvc_pb2  # type: ignore  # noqa: F401
     _PROTO_AVAILABLE = True
 except ImportError:
     _PROTO_AVAILABLE = False
@@ -136,7 +142,7 @@ class RemSvcOperator(BaseOperator):
     ... )
     """
 
-    template_fields: Sequence[str] = ("commands", "metadata")
+    template_fields: Sequence[str] = ("grpc_conn_id", "commands", "metadata")
     template_fields_renderers = {"commands": "json"}
     ui_color = "#8f70d4"
 

@@ -61,12 +61,16 @@ _RETRYABLE_CODES = frozenset({
     grpc.StatusCode.RESOURCE_EXHAUSTED,
 })
 
-from airflow.triggers.base import BaseTrigger, TriggerEvent
+try:
+    from airflow.sdk.bases.trigger import BaseTrigger  # Airflow 3.x
+    from airflow.sdk.execution_time.comms import TriggerEvent
+except ImportError:
+    from airflow.triggers.base import BaseTrigger, TriggerEvent  # type: ignore[assignment]  # Airflow 2.x
 
 # Stubs are generated from RemSvc/src/proto/ into RemSvc/prv/remsvc_proto/
 try:
-    from remsvc_proto import remsvc_pb2 as pb2              # type: ignore
-    from remsvc_proto import remsvc_pb2_grpc as pb2_grpc    # type: ignore
+    from remsvc_proto import RemSvc_pb2 as pb2              # type: ignore
+    from remsvc_proto import RemSvc_pb2_grpc as pb2_grpc    # type: ignore
     _PROTO_AVAILABLE = True
 except ImportError:
     pb2 = None          # type: ignore[assignment]
@@ -264,6 +268,11 @@ class RemSvcTrigger(BaseTrigger):
         caller reads ``sent_ref[0]`` after an exception to decide whether a
         retry is safe (zero means no writes reached the server).
         """
+        # Prime the hook's connection cache asynchronously so that the
+        # subsequent sync helpers (_async_channel, _call_metadata) don't
+        # trigger the Airflow "sync call in async context" warning.
+        await self._ensure_hook_conn()
+
         # get_async_channel() returns a pooled channel shared with other
         # concurrent triggers — do NOT close it here.
         channel  = self._async_channel()
@@ -368,6 +377,14 @@ class RemSvcTrigger(BaseTrigger):
             from remsvc_provider.hooks.remsvc import RemSvcHook
             self._hook_cache = RemSvcHook(self.grpc_conn_id)
         return self._hook_cache
+
+    async def _ensure_hook_conn(self) -> None:
+        """Prime the hook's connection cache asynchronously.
+
+        Call once before _async_channel() / _call_metadata() so those sync
+        helpers don't trigger the sync-in-async Airflow warning.
+        """
+        await self._hook().get_async_conn()
 
     def _async_channel(self) -> grpc.aio.Channel:
         """Return a pooled async gRPC channel via RemSvcHook."""

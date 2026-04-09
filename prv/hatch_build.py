@@ -99,4 +99,18 @@ class CustomBuildHook(BuildHookInterface):
                 f"stderr:\n{result.stderr}"
             )
 
+        # Fix grpc_tools codegen bug: the generated *_pb2_grpc.py uses a bare
+        # `import RemSvc_pb2` which works in-directory but fails when the stubs
+        # are installed as a package.  Rewrite to a package-qualified import.
+        grpc_stub = stub_out / "RemSvc_pb2_grpc.py"
+        if grpc_stub.exists():
+            text = grpc_stub.read_text()
+            fixed = text.replace(
+                "import RemSvc_pb2 as RemSvc__pb2",
+                "from remsvc_proto import RemSvc_pb2 as RemSvc__pb2",
+            )
+            if fixed != text:
+                grpc_stub.write_text(fixed)
+                self.app.display_info("hatch_build: patched RemSvc_pb2_grpc.py import.")
+
         self.app.display_info("hatch_build: stub generation complete.")
