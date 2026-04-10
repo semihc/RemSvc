@@ -30,9 +30,6 @@ This project utilizes a **monorepo** pattern consisting of two independently dep
 1.  **Service (Server):** The gRPC server residing on the target host.
 2.  **Provider (Client):** The Airflow-specific integration layer.
 
-
-The project has two independent deployable components that share a single `.proto` contract:
-
 | Component                  | Language              | Location |
 | -------------------------- | --------------------- | -------- |
 | gRPC server / CLI client   | C++20 (Qt 6, CMake)   | `src/`   |
