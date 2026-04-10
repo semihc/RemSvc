@@ -1,9 +1,35 @@
 # RemSvc — Remote Execution Service
 
-RemSvc is a gRPC-based remote execution service.  It lets authorised callers
-execute shell or PowerShell commands on a remote host and receive the output
-over an encrypted channel.  The project has two independent deployable
-components that share a single `.proto` contract:
+
+**RemSvc** is a gRPC-based remote execution service that allows authorized callers to execute Shell (Bash/Cmd) or PowerShell commands on a remote host. All communication occurs over an encrypted channel using **gRPC** and **Protocol Buffers (Protobuf)** serialization.
+
+## Core Features
+* **Decoupled Design:** While built for the Apache Airflow ecosystem, RemSvc does not require access to Airflow instances, databases, or internal implementation details.
+* **Agnostic Execution:** Commands are treated as a stream of strings; the service executes them and returns the output and status code to the caller.
+* **High Performance:** Leverages **HTTP/2** capabilities, including bidirectional streaming and port multiplexing, allowing a single RemSvc instance to serve multiple clients through a single TCP port.
+
+## Security Posture
+RemSvc provides a robust security framework to protect remote hosts:
+* **TLS Encryption:** Full transport-level encryption.
+* **Authentication:** Client verification via Bearer Tokens.
+* **Integrity:** Command hashing to detect tampering.
+* **Access Control:** Service-level **Allow and Deny lists** for specific commands.
+* **OS-Level Restrictions:** On systems that support effective user changes (primarily Unix), RemSvc can drop privileges to restrict process capabilities.
+* **Defense in Depth:** Designed to work alongside platform, process, and file-level access controls to further reduce the attack surface.
+
+## Apache Airflow Integration
+This project includes a dedicated provider, `airflow-provider-remsvc`, which introduces the `remsvc://` URI notation.
+
+### Key Integration Benefits:
+* **RemSvcOperator:** Easily trigger remote commands within your DAGs and collect results via **XComs**.
+* **Asynchronous Execution:** Remote calls are managed by the **Airflow Triggerer**. This prevents Airflow workers from being occupied during long-running remote executions, optimizing resource utilization.
+* **Cloud Agnostic:** This architecture allows Airflow to manage a large fleet of servers across private data centers and public/hybrid cloud environments.
+
+## Project Structure
+This project utilizes a **monorepo** pattern consisting of two independently deployable components that share a single `.proto` contract:
+
+1.  **Service (Server):** The gRPC server residing on the target host.
+2.  **Provider (Client):** The Airflow-specific integration layer.
 
 | Component                  | Language              | Location |
 | -------------------------- | --------------------- | -------- |
