@@ -1,6 +1,5 @@
 # RemSvc — Remote Execution Service
 
-
 **RemSvc** is a gRPC-based remote execution service that allows authorized callers to execute Shell (Bash/Cmd) or PowerShell commands on a remote host. All communication occurs over an encrypted channel using **gRPC** and **Protocol Buffers (Protobuf)** serialization.
 
 ## Core Features
