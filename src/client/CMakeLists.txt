@@ -24,3 +24,8 @@ target_link_libraries(remsvc_client_lib PUBLIC ${CLIENT_LIBS})
 add_executable(client RemSvcMain.cc)
 set_target_properties(client PROPERTIES OUTPUT_NAME "RemSvc_client")
 target_link_libraries(client PRIVATE remsvc_client_lib)
+
+install(TARGETS client
+    RUNTIME DESTINATION bin
+    COMPONENT Runtime
+)

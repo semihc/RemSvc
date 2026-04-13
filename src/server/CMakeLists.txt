@@ -41,3 +41,8 @@ target_link_libraries(server PUBLIC remsvc_impl
   absl::log
   Qt6::Core
 )
+
+install(TARGETS server
+    RUNTIME DESTINATION bin
+    COMPONENT Runtime
+)

@@ -46,3 +46,92 @@ add_subdirectory(src)
 
 enable_testing()
 add_subdirectory(tst)
+
+
+# ── Install rules ─────────────────────────────────────────────────
+include(GNUInstallDirs)
+
+install(TARGETS server client
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT Runtime
+)
+
+# ── Qt runtime deployment ─────────────────────────────────────────
+# windeployqt copies Qt DLLs, plugins, and translations needed at runtime.
+# It runs at install time so that CPack picks up everything it copies.
+if(WIN32)
+    find_program(WINDEPLOYQT_EXECUTABLE windeployqt
+        HINTS "${Qt6_DIR}/../../../bin"
+    )
+    if(WINDEPLOYQT_EXECUTABLE)
+        # Deploy Qt dependencies for the server binary
+        install(CODE "
+            message(STATUS \"Running windeployqt for RemSvc_server...\")
+            execute_process(
+                COMMAND \"${WINDEPLOYQT_EXECUTABLE}\"
+                    --no-translations
+                    --no-system-d3d-compiler
+                    --no-opengl-sw
+                    --dir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\"
+                    \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/RemSvc_server.exe\"
+                RESULT_VARIABLE _wdq_result
+            )
+            if(NOT _wdq_result EQUAL 0)
+                message(FATAL_ERROR \"windeployqt failed for RemSvc_server (exit \${_wdq_result})\")
+            endif()
+        "
+        COMPONENT Runtime
+        )
+        # Deploy Qt dependencies for the client binary
+        install(CODE "
+            message(STATUS \"Running windeployqt for RemSvc_client...\")
+            execute_process(
+                COMMAND \"${WINDEPLOYQT_EXECUTABLE}\"
+                    --no-translations
+                    --no-system-d3d-compiler
+                    --no-opengl-sw
+                    --dir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\"
+                    \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/RemSvc_client.exe\"
+                RESULT_VARIABLE _wdq_result
+            )
+            if(NOT _wdq_result EQUAL 0)
+                message(FATAL_ERROR \"windeployqt failed for RemSvc_client (exit \${_wdq_result})\")
+            endif()
+        "
+        COMPONENT Runtime
+        )
+    else()
+        message(WARNING "windeployqt not found — Qt DLLs will NOT be bundled. "
+                        "Set Qt6_DIR or add Qt bin/ to PATH before configuring.")
+    endif()
+endif()
+
+# ── CPack ─────────────────────────────────────────────────────────
+set(CPACK_PACKAGE_NAME        "RemSvc")
+set(CPACK_PACKAGE_VERSION     ${PROJECT_VERSION})
+set(CPACK_PACKAGE_VENDOR      "Bupa")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "Remote Execution Service — gRPC server and CLI client")
+set(CPACK_PACKAGE_CONTACT     "semih.cemiloglu@bupa.com.au")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/lic/LICENSE.txt")
+
+# Put all installable components into a single package
+set(CPACK_COMPONENTS_ALL Runtime)
+
+if(WIN32)
+    # ZIP: no external installer tool required; easily extracted on any Windows host
+    set(CPACK_GENERATOR "ZIP")
+    set(CPACK_PACKAGE_FILE_NAME
+        "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-win64")
+elseif(UNIX)
+    set(CPACK_GENERATOR "TGZ;DEB")
+    set(CPACK_PACKAGE_FILE_NAME
+        "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-linux-x64")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
+    set(CPACK_DEBIAN_PACKAGE_SECTION    "utils")
+    # gRPC and Qt are statically linked or bundled — no Debian deps declared.
+    # Add entries here if you switch to shared linking on Linux.
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS    "")
+endif()
+
+include(CPack)
