@@ -13,6 +13,22 @@ description = "Apache Airflow provider for RemSvc remote execution via gRPC"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
+authors = [
+    { name = "Semih Cemiloglu", email = "semih.cemiloglu@gmail.com" },
+]
+keywords = ["airflow", "provider", "grpc", "remote-execution"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Distributed Computing",
+    "Framework :: Apache Airflow",
+    "Framework :: Apache Airflow :: Provider",
+]
 dependencies = [
     # NOTE: apache-airflow is intentionally NOT listed here as a hard
     # dependency — it is provided by the target Airflow environment.
@@ -25,6 +41,11 @@ dependencies = [
     # wrapper) is not imported anywhere and would be a dead dependency.
     "protobuf>=4.0.0,<6",
 ]
+
+[project.urls]
+Homepage   = "https://github.com/semihc/RemSvc"
+Repository = "https://github.com/semihc/RemSvc"
+Issues     = "https://github.com/semihc/RemSvc/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -60,6 +81,12 @@ packages = ["remsvc_provider", "remsvc_proto"]
 [tool.hatch.build.hooks.custom]
 # Activates hatch_build.py — generates gRPC stubs at build time.
 path = "hatch_build.py"
+
+[tool.hatch.publish.index]
+url = "https://upload.pypi.org/legacy/"
+
+[tool.hatch.publish.test]
+url = "https://test.pypi.org/legacy/"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -229,13 +229,24 @@ Full CLI reference:
 
 ### Installation
 
+**From PyPI** (production use):
+
+```bash
+pip install airflow-provider-remsvc
+```
+
+The package is available at [pypi.org/project/airflow-provider-remsvc](https://pypi.org/project/airflow-provider-remsvc/).
+It includes pre-generated gRPC stubs — no protoc or extra build tools required.
+
+**From source** (development):
+
 ```bash
 cd prv/
 pip install -e ".[dev]"
 ```
 
-`pip install` auto-generates the Python gRPC stubs from `src/proto/RemSvc.proto`
-via a Hatchling build hook — no manual stub generation step is required.
+The Hatchling build hook generates the Python gRPC stubs from `src/proto/RemSvc.proto`
+automatically — no manual stub generation step is required.
 
 ### Airflow Connection Setup
 
@@ -299,18 +310,35 @@ Results are always sorted ascending by `tid` (i.e. original command order).
 
 ### Running tests
 
+On a fresh host, run these steps once before invoking pytest:
+
 ```bash
 cd prv/
-pytest ../tst/unit/prv -v
+
+# 1. Install the package and all dev dependencies.
+#    The Hatchling build hook generates the Python gRPC stubs automatically
+#    into remsvc_proto/: RemSvc_pb2.py and RemSvc_pb2_grpc.py
+#    If stubs are missing after install, run: ./regen_proto.sh
+pip install -e ".[dev]"
+
+# 2. Run the full test suite
+pytest
+```
+
+Or from the repo root without `cd`:
+
+```bash
+PYTHONPATH=prv pytest tst/unit/prv
 ```
 
 ### Regenerating gRPC stubs manually
 
-Only needed if `src/proto/RemSvc.proto` changes and you are working in an
-editable install without rebuilding:
+Required on a fresh host if `pip install` did not generate them, or any time
+`src/proto/RemSvc.proto` changes:
 
 ```bash
 cd prv/
+chmod +x regen_proto.sh   # only needed once
 ./regen_proto.sh
 ```
 

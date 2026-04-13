@@ -1,6 +1,6 @@
 # Top level CMake Project
 cmake_minimum_required(VERSION 3.18.4) 
-project(RemSvc LANGUAGES C CXX VERSION 0.1)
+project(RemSvc LANGUAGES C CXX VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED OFF)
 #-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++20") # Appends the flag
@@ -17,14 +17,22 @@ message(STATUS "CMAKE_SYSTEM_NAME = ${CMAKE_SYSTEM_NAME}")
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   #
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  # Hints to find_package() call below
-  set(absl_DIR /data/local/stow/grpc-1.67.0/lib64/cmake/absl)
-  set(utf8_range_DIR /data/local/stow/grpc-1.67.0/lib64/cmake/utf8_range)
-  set(protobuf_DIR /data/local/stow/grpc-1.67.0/lib64/cmake/protobuf)
-  set(gRPC_DIR /data/local/stow/grpc-1.67.0/lib/cmake/grpc)
-  set(Qt6_DIR /data/local/stow/qt-6.8.1/lib/cmake/Qt6)
-  set(CLI11_DIR /data/local/stow/CLI11-2.4.1/share/cmake/CLI11)    
-  set(GTest_DIR /data/local/stow/gtest-1.17.0/lib64/cmake/GTest)
+  if(EXISTS /data/local/stow/grpc-1.67.0)
+    # Original build host — custom stow prefix
+    set(absl_DIR /data/local/stow/grpc-1.67.0/lib64/cmake/absl)
+    set(utf8_range_DIR /data/local/stow/grpc-1.67.0/lib64/cmake/utf8_range)
+    set(protobuf_DIR /data/local/stow/grpc-1.67.0/lib64/cmake/protobuf)
+    set(gRPC_DIR /data/local/stow/grpc-1.67.0/lib/cmake/grpc)
+    set(Qt6_DIR /data/local/stow/qt-6.8.1/lib/cmake/Qt6)
+    set(CLI11_DIR /data/local/stow/CLI11-2.4.1/share/cmake/CLI11)
+    set(GTest_DIR /data/local/stow/gtest-1.17.0/lib64/cmake/GTest)
+  elseif(EXISTS /opt/stow/qt-6.8.3)
+    # gobi — apt gRPC + /opt/stow packages
+    set(Qt6_DIR /opt/stow/qt-6.8.3/lib/cmake/Qt6)
+    set(CLI11_DIR /opt/stow/CLI11-v2.5.0/share/cmake/CLI11)
+    set(spdlog_DIR /opt/stow/spdlog-v1.15.2/lib/cmake/spdlog)
+    set(GTest_DIR /opt/stow/gtest-v1.16.0/lib/cmake/GTest)
+  endif()
 endif()
 
 
@@ -32,7 +40,7 @@ endif()
 find_package(Threads)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
-find_package(protobuf CONFIG REQUIRED)
+find_package(Protobuf REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 
 
@@ -51,7 +59,7 @@ add_subdirectory(tst)
 # ── Install rules ─────────────────────────────────────────────────
 include(GNUInstallDirs)
 
-install(TARGETS server client
+install(TARGETS client
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     COMPONENT Runtime
 )

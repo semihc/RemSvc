@@ -42,7 +42,45 @@ target_link_libraries(server PUBLIC remsvc_impl
   Qt6::Core
 )
 
-install(TARGETS server
-    RUNTIME DESTINATION bin
-    COMPONENT Runtime
-)
+# ── Shared library deployment ──────────────────────────────────────────────
+# On Linux, collect all non-system shared library dependencies (gRPC, protobuf,
+# Qt6, absl, ICU, …) into a self-contained deploy/ directory using ldd.
+# A generated launcher script sets LD_LIBRARY_PATH before exec-ing the binary.
+# Falls back to a bare binary install on non-Linux platforms.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(_deploy_dir ${CMAKE_BINARY_DIR}/deploy/RemSvc_server)
+    set(_deploy_script ${CMAKE_SOURCE_DIR}/cmake/DeployLinux.cmake)
+
+    add_custom_command(TARGET server POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf ${_deploy_dir}
+        COMMAND ${CMAKE_COMMAND}
+                -DBINARY=$<TARGET_FILE:server>
+                -DDEPLOY_DIR=${_deploy_dir}
+                -P ${_deploy_script}
+        COMMENT "Collecting all shared library dependencies for RemSvc_server"
+        VERBATIM
+    )
+
+    # Install deployed layout:
+    #   bin/RemSvc_server      — binary
+    #   lib/lib*.so.*          — all bundled shared libs
+    #   bin/RemSvc_server.sh   — launcher (sets LD_LIBRARY_PATH)
+    install(DIRECTORY ${_deploy_dir}/bin/
+        DESTINATION bin
+        COMPONENT Runtime
+        USE_SOURCE_PERMISSIONS
+    )
+    install(DIRECTORY ${_deploy_dir}/lib/
+        DESTINATION lib
+        COMPONENT Runtime
+    )
+    install(PROGRAMS ${_deploy_dir}/RemSvc_server.sh
+        DESTINATION bin
+        COMPONENT Runtime
+    )
+else()
+    install(TARGETS server
+        RUNTIME DESTINATION bin
+        COMPONENT Runtime
+    )
+endif()

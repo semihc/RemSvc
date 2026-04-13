@@ -219,6 +219,7 @@ class TestRemSvcTriggerRunStream:
         stub    = MagicMock()
         stub.RemCmdStrm.return_value = stream
         channel = _mock_channel_ctx(stub)
+        patch.object(trigger, "_ensure_hook_conn", new=AsyncMock()).start()
         patch.object(trigger, "_call_metadata", return_value=[]).start()
         patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()).start()
         return channel, stub, stream
@@ -745,7 +746,8 @@ class TestRemSvcTriggerDuplicateTid:
         channel.__aenter__ = AsyncMock(return_value=channel)
         channel.__aexit__  = AsyncMock(return_value=False)
 
-        with patch.object(t, "_async_channel", return_value=channel), \
+        with patch.object(t, "_ensure_hook_conn", new=AsyncMock()), \
+             patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub), \
              patch.object(t, "_call_metadata", return_value=[]), \
              patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()), \
@@ -767,7 +769,8 @@ class TestRemSvcTriggerDuplicateTid:
         channel.__aenter__ = AsyncMock(return_value=channel)
         channel.__aexit__  = AsyncMock(return_value=False)
 
-        with patch.object(t, "_async_channel", return_value=channel), \
+        with patch.object(t, "_ensure_hook_conn", new=AsyncMock()), \
+             patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub), \
              patch.object(t, "_call_metadata", return_value=[]), \
              patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()):
@@ -862,7 +865,8 @@ class TestRemSvcTriggerMetadata:
 
         # _call_metadata() calls _hook() which hits the Airflow DB; patch it
         # directly to return our known metadata list.
-        with patch.object(t, "_async_channel", return_value=channel), \
+        with patch.object(t, "_ensure_hook_conn", new=AsyncMock()), \
+             patch.object(t, "_async_channel", return_value=channel), \
              patch.object(t, "_async_stub",    return_value=stub), \
              patch.object(t, "_call_metadata", return_value=meta), \
              patch("remsvc_provider.triggers.remsvc.pb2", MagicMock()):
