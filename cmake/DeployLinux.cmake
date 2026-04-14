@@ -10,21 +10,34 @@
 cmake_minimum_required(VERSION 3.18)
 
 # ── Exclusion list ─────────────────────────────────────────────────────────
-# Name patterns for libs that are virtual or always provided by the kernel ABI.
+# These libraries are part of the Linux ABI and are guaranteed to be present
+# on any modern Linux host — do not bundle them.
 set(SYSTEM_LIB_PATTERNS
     "linux-vdso"
     "ld-linux"
+    "libc\\.so"
+    "libm\\.so"
+    "libdl\\.so"
+    "libpthread\\.so"
+    "librt\\.so"
 )
 
-# Path prefixes that are part of the base OS ABI — never bundle from these.
-# libstdc++ and libgcc_s are intentionally NOT name-excluded: if they resolve
-# to a custom GCC installation (e.g. /data/local/lib64/) they must be bundled
-# so the binary runs on hosts with older system GCC runtimes.
+# Path prefixes considered "system" paths.  Used only for the conditional
+# libs below — NOT applied globally, because on apt-based hosts app libs
+# such as gRPC and protobuf also live under /lib/x86_64-linux-gnu/.
 set(SYSTEM_PATH_PREFIXES
     "/lib/"
     "/lib64/"
     "/usr/lib/"
     "/usr/lib64/"
+)
+
+# These libs are excluded only when they resolve from a system path prefix.
+# When they resolve from a custom GCC installation (e.g. /data/local/lib64/)
+# they must be bundled so the binary runs on hosts with older GCC runtimes.
+set(CONDITIONAL_SYSTEM_LIB_PATTERNS
+    "libstdc\\+\\+\\.so"
+    "libgcc_s\\.so"
 )
 
 # ── Output directories ─────────────────────────────────────────────────────
@@ -63,7 +76,7 @@ foreach(_line IN LISTS _lines)
     endif()
     set(_lib_path "${CMAKE_MATCH_1}")
 
-    # Skip virtual / kernel-ABI libs by name
+    # Skip always-system libs by name (libc, libm, etc.)
     set(_skip FALSE)
     foreach(_pat IN LISTS SYSTEM_LIB_PATTERNS)
         if(_lib_path MATCHES "${_pat}")
@@ -72,12 +85,17 @@ foreach(_line IN LISTS _lines)
         endif()
     endforeach()
 
-    # Skip libs that resolve into base OS directories (e.g. /lib64/, /usr/lib64/)
-    # but bundle those from custom prefixes (e.g. /data/local/lib64/).
+    # libstdc++ and libgcc_s: skip only when resolved from a system path;
+    # bundle when from a custom GCC installation (e.g. /data/local/lib64/).
     if(NOT _skip)
-        foreach(_prefix IN LISTS SYSTEM_PATH_PREFIXES)
-            if(_lib_path MATCHES "^${_prefix}")
-                set(_skip TRUE)
+        foreach(_pat IN LISTS CONDITIONAL_SYSTEM_LIB_PATTERNS)
+            if(_lib_path MATCHES "${_pat}")
+                foreach(_prefix IN LISTS SYSTEM_PATH_PREFIXES)
+                    if(_lib_path MATCHES "^${_prefix}")
+                        set(_skip TRUE)
+                        break()
+                    endif()
+                endforeach()
                 break()
             endif()
         endforeach()

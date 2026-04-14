@@ -40,7 +40,7 @@ endif()
 find_package(Threads)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
-find_package(protobuf CONFIG REQUIRED)
+find_package(Protobuf REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 
 

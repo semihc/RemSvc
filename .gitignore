@@ -11,9 +11,9 @@ CTestTestfile.cmake
 _deps
 *~
 .#*
-bld_vc
-bld_vc_rel
-bld_gcc
+bld_vc*
+bld_gcc*
+.vscode/
 .claude/
 .codex
 
