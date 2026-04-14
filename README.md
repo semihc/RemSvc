@@ -1,4 +1,4 @@
-# RemSvc — Remote Execution Service
+﻿# RemSvc — Remote Execution Service
 
 **RemSvc** is a gRPC-based remote execution service that allows authorized callers to execute Shell (Bash/Cmd) or PowerShell commands on a remote host. All communication occurs over an encrypted channel using **gRPC** and **Protocol Buffers (Protobuf)** serialization.
 
@@ -117,28 +117,135 @@ child process and they do not share any process state.
 
 ## C++ Build
 
-**Requirements:** CMake ≥ 3.18.4, VCPKG, Visual C++ (Windows) or GCC/Clang (Linux), Qt 6.
+**Requirements:** CMake ≥ 3.18.4, VCPKG, Qt 6.
+
+#### Windows (Visual C++)
+
+Ninja is a single-config generator — the build type is fixed at configure
+time, not at build time.  Two presets are provided:
+
+| Preset      | Build type | Binary dir   | Use for                        |
+| ----------- | ---------- | ------------ | ------------------------------ |
+| `bld_vc`    | Debug      | `bld_vc/`    | Development and unit tests     |
+| `bld_vc_rel`| Release    | `bld_vc_rel/`| Deployment packaging           |
 
 ```bash
 # Set VCPKG_ROOT to your VCPKG installation
-export VCPKG_ROOT=/path/to/vcpkg
+set VCPKG_ROOT=C:\path\to\vcpkg
 
-# Configure
+# Debug build (development)
 cmake --preset=bld_vc
+cmake --build bld_vc
+ctest --test-dir bld_vc
+
+# Release build (deployment)
+cmake --preset=bld_vc_rel
+cmake --build bld_vc_rel
+ctest --test-dir bld_vc_rel
+```
+
+Key build outputs (release):
+
+| Binary                                | Description |
+| ------------------------------------- | ----------- |
+| `bld_vc_rel/server/RemSvc_server.exe` | gRPC server |
+| `bld_vc_rel/client/RemSvc_client.exe` | CLI client  |
+
+#### Linux (GCC / Clang)
+
+```bash
+# Configure — bld_gcc is the conventional build directory name on Linux.
+# Dependencies (gRPC, Qt6, absl, …) are resolved from stow prefixes
+# auto-detected by CMakeLists.txt; no VCPKG toolchain is required.
+cmake -B bld_gcc -G Ninja -S. -DCMAKE_BUILD_TYPE=Release
 
 # Build all targets
-cmake --build bld_vc
+cmake --build bld_gcc
 
 # Run C++ unit tests
-ctest --test-dir bld_vc
+ctest --test-dir bld_gcc -V
 ```
 
 Key build outputs:
 
-| Binary                           | Description   |
-| -------------------------------- | ------------- |
-| `bld_vc/server/RemSvc_server.exe` | gRPC server   |
-| `bld_vc/client/RemSvc_client.exe` | CLI client    |
+| Binary                        | Description |
+| ----------------------------- | ----------- |
+| `bld_gcc/server/RemSvc_server` | gRPC server |
+| `bld_gcc/client/RemSvc_client` | CLI client  |
+
+### Packaging — Linux (TGZ / DEB)
+
+After a successful build, stage the install tree and produce the archives:
+
+```bash
+# Run cpack from inside the build directory so the archives land there.
+# DeployLinux.cmake runs as part of staging: it collects all non-system
+# shared libraries (gRPC, protobuf, absl, Qt6, ICU, …) via ldd and writes
+# a launcher script that sets LD_LIBRARY_PATH before exec-ing the binary.
+cd bld_gcc && cpack
+# → bld_gcc/RemSvc-1.0.0-linux-x64.tar.gz
+# → bld_gcc/RemSvc-1.0.0-linux-x64.deb
+```
+
+The TGZ (and DEB) extracts to:
+
+```
+RemSvc-1.0.0-linux-x64/
+├── bin/
+│   ├── RemSvc_server          ← gRPC server binary
+│   ├── RemSvc_server.sh       ← launcher (sets LD_LIBRARY_PATH, then exec's the binary)
+│   └── RemSvc_client          ← CLI client binary
+└── lib/
+    └── libgrpc.so.*, libprotobuf.so.*, libQt6Core.so.*, …  ← all bundled shared libs
+```
+
+Always use `RemSvc_server.sh` as the entry point — it sets `LD_LIBRARY_PATH`
+to the co-located `lib/` directory before executing the binary, so no
+system-wide library installation is required.
+
+To deploy: extract the TGZ (or install the DEB) on the target host, write a
+config file, then install as a systemd service.  See
+[doc/linux-service-install.md](doc/linux-service-install.md) for step-by-step
+instructions covering both system-wide (root) and user-mode (no root) setups.
+
+### Packaging — Windows (ZIP)
+
+After a successful build, create the self-contained deployment ZIP:
+
+```bash
+# Run cpack from inside the release build directory so the archive lands there.
+# The install rules run windeployqt (Qt DLLs), DeployWindows.cmake
+# (gRPC/protobuf/absl/BoringSSL DLLs), and InstallRequiredSystemLibraries
+# (MSVC runtime DLLs) as part of staging.
+cd bld_vc_rel && cpack
+# → bld_vc_rel/RemSvc-1.0.0-win64.zip
+```
+
+The ZIP extracts to:
+
+```
+RemSvc-1.0.0-win64/
+├── bin/
+│   ├── RemSvc_server.exe          ← gRPC server
+│   ├── RemSvc_client.exe          ← CLI client
+│   ├── Qt6Core.dll, …             ← Qt runtime (windeployqt)
+│   ├── libprotobuf.dll, abseil_dll.dll, …  ← protobuf / absl / BoringSSL / re2 / cares / zlib (gRPC statically linked into exe)
+│   ├── vcruntime140.dll, …        ← MSVC C++ runtime
+│   └── install-service.ps1        ← Windows service setup script (NSSM)
+└── config/
+    └── server.ini.example         ← annotated configuration template
+```
+
+**Minimum OS requirement:** Windows Server 2019 version 1903 or later (or
+Windows Server 2022).  Qt 6.x uses the Windows system ICU library (`icu.dll`
+in `System32`), which was added in Windows 10/Server 1903.  Earlier builds
+lack `icu.dll` and will fail to start the server.
+
+To deploy: extract the ZIP on the target host, copy
+`config\server.ini.example` to a permanent location (e.g.
+`C:\ProgramData\RemSvc\remsvc.ini`), edit it, then run
+`bin\install-service.ps1` from an elevated PowerShell prompt.  See
+[doc/windows-service-install.md](doc/windows-service-install.md) for details.
 
 ### Server configuration (INI file)
 

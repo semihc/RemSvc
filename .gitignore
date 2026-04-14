@@ -12,6 +12,7 @@ _deps
 *~
 .#*
 bld_vc
+bld_vc_rel
 bld_gcc
 .claude/
 .codex

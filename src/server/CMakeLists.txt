@@ -78,6 +78,42 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         DESTINATION bin
         COMPONENT Runtime
     )
+elseif(WIN32)
+    install(TARGETS server
+        RUNTIME DESTINATION bin
+        COMPONENT Runtime
+    )
+
+    # ── Bundle non-system runtime DLLs (gRPC, protobuf, absl, BoringSSL…) ───
+    # CMAKE_PREFIX_PATH is set by the bld_vc preset to
+    # $VCPKG_ROOT/installed/x64-windows, so the first entry's bin/ subdir is
+    # where all vcpkg-built DLLs live.  The path is baked in at configure time
+    # so the install script does not need VCPKG_ROOT at install time.
+    list(GET CMAKE_PREFIX_PATH 0 _vcpkg_prefix)
+    set(_vcpkg_bin "${_vcpkg_prefix}/bin")
+    # Qt6_DIR points to lib/cmake/Qt6; bin/ is three levels up.
+    get_filename_component(_qt_bin "${Qt6_DIR}/../../../bin" ABSOLUTE)
+    install(CODE "
+        set(BINARY     \"\${CMAKE_INSTALL_PREFIX}/bin/RemSvc_server.exe\")
+        set(DEPLOY_DIR \"\${CMAKE_INSTALL_PREFIX}/bin\")
+        set(VCPKG_BIN  \"${_vcpkg_bin}\")
+        set(QT_BIN     \"${_qt_bin}\")
+        include(\"${CMAKE_SOURCE_DIR}/cmake/DeployWindows.cmake\")
+    "
+    COMPONENT Runtime
+    )
+
+    # ── Windows deployment extras ─────────────────────────────────────────
+    # Config template — gives operators a documented starting point.
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/server.ini.example
+        DESTINATION config
+        COMPONENT Runtime
+    )
+    # Service-install helper — automates the NSSM setup steps.
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/install-service.ps1
+        DESTINATION bin
+        COMPONENT Runtime
+    )
 else()
     install(TARGETS server
         RUNTIME DESTINATION bin

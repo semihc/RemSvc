@@ -5,7 +5,34 @@ run it as a Windows service is with **NSSM** (Non-Sucking Service Manager), a
 free tool that wraps any executable in the Windows Service Control Manager
 without requiring changes to the application.
 
-## Prerequisites
+## Automated setup (recommended)
+
+The deployment ZIP includes `bin\install-service.ps1`, which automates all of
+the NSSM steps below.  Run it once from an elevated PowerShell prompt:
+
+```powershell
+# From the extracted ZIP directory:
+.\bin\install-service.ps1
+
+# Point at an explicit config file:
+.\bin\install-service.ps1 -ConfigFile C:\ProgramData\RemSvc\remsvc.ini
+
+# Remove the service:
+.\bin\install-service.ps1 -Action remove
+```
+
+The script installs NSSM settings, opens the firewall port, and starts the
+service.  NSSM must be on `PATH` or placed alongside the script.
+
+---
+
+## Manual setup
+
+The steps below are equivalent to what the script performs.  Use them if you
+need to customise settings beyond what the script exposes, or if you prefer
+to understand each step before running it.
+
+### Prerequisites
 
 - `RemSvc_server.exe` deployed (e.g. extracted from the CPack ZIP to
   `C:\Program Files\RemSvc\bin\`)
@@ -14,9 +41,7 @@ without requiring changes to the application.
   server binary)
 - An elevated (Administrator) command prompt for all commands below
 
----
-
-## Install the service
+### Install the service
 
 ```cmd
 nssm install RemSvc "C:\Program Files\RemSvc\bin\RemSvc_server.exe"

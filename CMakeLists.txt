@@ -40,7 +40,7 @@ endif()
 find_package(Threads)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
-find_package(Protobuf REQUIRED)
+find_package(protobuf CONFIG REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 
 
@@ -80,6 +80,7 @@ if(WIN32)
                     --no-translations
                     --no-system-d3d-compiler
                     --no-opengl-sw
+                    --no-compiler-runtime
                     --dir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\"
                     \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/RemSvc_server.exe\"
                 RESULT_VARIABLE _wdq_result
@@ -98,6 +99,7 @@ if(WIN32)
                     --no-translations
                     --no-system-d3d-compiler
                     --no-opengl-sw
+                    --no-compiler-runtime
                     --dir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\"
                     \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/RemSvc_client.exe\"
                 RESULT_VARIABLE _wdq_result
@@ -108,10 +110,41 @@ if(WIN32)
         "
         COMPONENT Runtime
         )
+        # Remove Windows system DLLs that windeployqt incorrectly picks up
+        # from PATH and copies into the staging directory:
+        #
+        #   vc_redist.x64.exe — VCRedist installer; individual runtime DLLs are
+        #                        already provided by InstallRequiredSystemLibraries.
+        #   icuuc.dll         — Windows ICU forwarder DLL (System32 shim that
+        #                        delegates to icu.dll). Qt 6.x uses the Windows
+        #                        system ICU directly; bundling the forwarder
+        #                        breaks on older Server builds that lack icu.dll.
+        #                        The target OS must supply it (see README).
+        install(CODE "
+            foreach(_f vc_redist.x64.exe icuuc.dll)
+                set(_path \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/\${_f}\")
+                if(EXISTS \"\${_path}\")
+                    file(REMOVE \"\${_path}\")
+                    message(STATUS \"Removed system DLL planted by windeployqt: \${_f}\")
+                endif()
+            endforeach()
+        "
+        COMPONENT Runtime
+        )
     else()
         message(WARNING "windeployqt not found — Qt DLLs will NOT be bundled. "
                         "Set Qt6_DIR or add Qt bin/ to PATH before configuring.")
     endif()
+endif()
+
+# ── Visual C++ Runtime (VCRedist) ─────────────────────────────────────────
+# InstallRequiredSystemLibraries locates and installs the MSVC runtime DLLs
+# (vcruntime140.dll, msvcp140.dll, …) that match the toolchain used to build.
+# These are placed in the Runtime component so CPack includes them in the ZIP.
+# DeployWindows.cmake explicitly excludes them to avoid double-copying.
+if(WIN32)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_COMPONENT Runtime)
+    include(InstallRequiredSystemLibraries)
 endif()
 
 # ── CPack ─────────────────────────────────────────────────────────

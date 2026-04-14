@@ -11,6 +11,10 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#endif
 
 // Prj includes
 #include "GrpcServerThread.hh"
@@ -28,6 +32,13 @@ using namespace RS;
 int main(int argc, char *argv[]) {
     int rc{};
     std::string_view appName{ argv[0] };
+
+#ifdef _WIN32
+    // Switch the console output codepage to UTF-8 so that log messages
+    // containing non-ASCII characters (em dashes, arrows, …) render
+    // correctly instead of appearing as mojibake (e.g. "ÔÇö").
+    SetConsoleOutputCP(CP_UTF8);
+#endif
 
     // ── Step 1: pre-parse --config only, to load the INI file first ──────────
     // CLI11 allow_extras lets us ignore all other flags at this stage.

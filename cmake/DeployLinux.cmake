@@ -10,18 +10,21 @@
 cmake_minimum_required(VERSION 3.18)
 
 # ── Exclusion list ─────────────────────────────────────────────────────────
-# These libraries are part of the Linux ABI and are guaranteed to be present
-# on any modern Linux host — do not bundle them.
+# Name patterns for libs that are virtual or always provided by the kernel ABI.
 set(SYSTEM_LIB_PATTERNS
     "linux-vdso"
-    "libc\\.so"
-    "libm\\.so"
-    "libdl\\.so"
-    "libpthread\\.so"
-    "librt\\.so"
-    "libgcc_s\\.so"
-    "libstdc\\+\\+\\.so"
     "ld-linux"
+)
+
+# Path prefixes that are part of the base OS ABI — never bundle from these.
+# libstdc++ and libgcc_s are intentionally NOT name-excluded: if they resolve
+# to a custom GCC installation (e.g. /data/local/lib64/) they must be bundled
+# so the binary runs on hosts with older system GCC runtimes.
+set(SYSTEM_PATH_PREFIXES
+    "/lib/"
+    "/lib64/"
+    "/usr/lib/"
+    "/usr/lib64/"
 )
 
 # ── Output directories ─────────────────────────────────────────────────────
@@ -60,7 +63,7 @@ foreach(_line IN LISTS _lines)
     endif()
     set(_lib_path "${CMAKE_MATCH_1}")
 
-    # Skip system libs
+    # Skip virtual / kernel-ABI libs by name
     set(_skip FALSE)
     foreach(_pat IN LISTS SYSTEM_LIB_PATTERNS)
         if(_lib_path MATCHES "${_pat}")
@@ -68,6 +71,18 @@ foreach(_line IN LISTS _lines)
             break()
         endif()
     endforeach()
+
+    # Skip libs that resolve into base OS directories (e.g. /lib64/, /usr/lib64/)
+    # but bundle those from custom prefixes (e.g. /data/local/lib64/).
+    if(NOT _skip)
+        foreach(_prefix IN LISTS SYSTEM_PATH_PREFIXES)
+            if(_lib_path MATCHES "^${_prefix}")
+                set(_skip TRUE)
+                break()
+            endif()
+        endforeach()
+    endif()
+
     if(_skip OR NOT EXISTS "${_lib_path}")
         continue()
     endif()

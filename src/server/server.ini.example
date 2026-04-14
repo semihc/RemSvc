@@ -1,0 +1,101 @@
+# RemSvc server configuration — example / template
+#
+# Copy this file to a location of your choice (e.g. C:\ProgramData\RemSvc\remsvc.ini)
+# and pass it to the server with:
+#
+#   RemSvc_server.exe --config C:\ProgramData\RemSvc\remsvc.ini
+#
+# All keys are optional.  Built-in defaults are shown in the comments.
+# CLI flags always take precedence over values in this file.
+#
+# Path values (cert, key, ca, log/file) support environment-variable expansion
+# using $VAR or ${VAR} syntax, e.g.:
+#   cert = ${REMSVC_CERT_DIR}\server.crt
+# Unrecognised variables are left unexpanded so misconfiguration is visible.
+
+
+[server]
+# TCP port the gRPC server listens on.  Must be 1–65535.
+# Default: 50051
+port = 50051
+
+# Per-command kill timeout in milliseconds.  The child process is terminated
+# hard after this deadline regardless of whether it has produced output.
+# Default: 30000
+cmd_timeout_ms = 30000
+
+
+[tls]
+# Set enabled = true to require TLS on all connections.
+# cert and key are mandatory when enabled = true.
+# Default: disabled (plain-text gRPC — suitable only for trusted networks)
+enabled = false
+
+# PEM-encoded server certificate.  Absolute paths are recommended.
+# cert = C:\ProgramData\RemSvc\certs\server.crt
+
+# PEM-encoded server private key matching the certificate above.
+# key  = C:\ProgramData\RemSvc\certs\server.key
+
+# Optional: PEM-encoded CA certificate.  When supplied the server requires
+# and verifies a client certificate on every connection (mutual TLS).
+# ca   = C:\ProgramData\RemSvc\certs\ca.crt
+
+
+[auth]
+# Bearer-token authentication.  Each key is an identity label; each value is
+# the secret token clients must send in the Authorization header.
+# Requires TLS — the server refuses to start with tokens configured but TLS
+# disabled.
+#
+# Token values support $VAR / ${VAR} expansion so secrets can live in the
+# environment rather than on disk in plain text:
+#
+#   airflow-prod    = ${REMSVC_TOKEN_PROD}
+#   airflow-staging = ${REMSVC_TOKEN_STAGING}
+#
+# Leave the section empty (or omit it entirely) to disable authentication.
+
+
+[allowlist]
+# Whitelist of ECMAScript regex patterns.  A submitted command must match at
+# least one pattern to be executed.  An empty (or absent) section allows all
+# commands that are not blocked by the denylist.
+#
+# Keys are arbitrary labels sorted alphabetically before evaluation; use
+# numbers for a predictable order:
+#
+#   1 = python\s+.*\.py
+#   2 = pip\s+(install|show|list)
+#
+# A malformed regex causes the server to enter deny-all mode at startup and
+# log an error — test patterns before deploying.
+
+
+[denylist]
+# Blacklist of ECMAScript regex patterns.  The denylist is evaluated BEFORE
+# the allowlist — any match results in PERMISSION_DENIED regardless of the
+# allowlist.
+#
+# Examples of patterns to block shell-escape vectors:
+#
+#   1 = .*[;&|`].*
+#   2 = .*rm\s+(-[rRf]+\s+)?/.*
+#   3 = .*>\s*/
+
+
+[log]
+# Path to the rotating log file.  If omitted, the server logs to a file named
+# after the executable in the current working directory.
+# Supports $VAR / ${VAR} expansion.
+#
+# file = C:\ProgramData\RemSvc\logs\remsvc.log
+
+# Minimum log level: trace | debug | info | warn | error
+# Default: info
+level = info
+
+# Verbosity of debug messages (0–9).  Only relevant when level = debug.
+# Higher values produce progressively more output.
+# Default: -1 (debug sub-levels disabled)
+# debug_level = 0

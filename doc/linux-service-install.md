@@ -24,7 +24,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin remsvc
 
 ```bash
 # Extract the CPack TGZ (adjust version as needed)
-sudo tar -xzf RemSvc-0.1-linux-x64.tar.gz -C /opt/remsvc --strip-components=1
+sudo tar -xzf RemSvc-1.0.0-linux-x64.tar.gz -C /opt/remsvc --strip-components=1
 
 # Create config and log directories
 sudo mkdir -p /etc/remsvc /var/log/remsvc
@@ -63,7 +63,7 @@ Type=simple
 User=remsvc
 Group=remsvc
 
-ExecStart=/opt/remsvc/bin/RemSvc_server --config /etc/remsvc/remsvc.ini
+ExecStart=/opt/remsvc/bin/RemSvc_server.sh --config /etc/remsvc/remsvc.ini
 Restart=on-failure
 RestartSec=5s
 
@@ -136,7 +136,7 @@ development host or an Airflow worker node where you have no sudo access.
 
 ```bash
 # Extract to a user-writable location
-tar -xzf RemSvc-0.1-linux-x64.tar.gz -C ~/opt/remsvc --strip-components=1
+tar -xzf RemSvc-1.0.0-linux-x64.tar.gz -C ~/opt/remsvc --strip-components=1
 
 # Config and log dirs
 mkdir -p ~/.config/remsvc ~/.local/share/remsvc/logs
@@ -171,7 +171,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/opt/remsvc/bin/RemSvc_server --config %h/.config/remsvc/remsvc.ini
+ExecStart=%h/opt/remsvc/bin/RemSvc_server.sh --config %h/.config/remsvc/remsvc.ini
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=10
